@@ -162,7 +162,7 @@ function listAddons() {
 }
 function addMediaEntry(url, headers = {}) {
   const id = crypto.randomBytes(18).toString("base64url");
-  mediaEntries.set(id, { url: String(url), headers, expires: Date.now() + MEDIA_TTL });
+  mediaEntries.set(id, { url: String(url), headers, publicBase: baseGlobalForMedia, expires: Date.now() + MEDIA_TTL });
   if (mediaEntries.size > MAX_MEDIA_ENTRIES) {
     for (const [key, item] of mediaEntries) if (item.expires < Date.now()) mediaEntries.delete(key);
     while (mediaEntries.size > MAX_MEDIA_ENTRIES) mediaEntries.delete(mediaEntries.keys().next().value);
@@ -378,7 +378,7 @@ function proxyRequest(req, res, rawTarget, extraHeaders = {}, redirects = 0, med
 function mediaUrlFromEntry(id, target) {
   const entry = mediaEntries.get(id);
   if (!entry || entry.expires < Date.now()) throw new Error("Sessão de mídia expirada.");
-  return baseGlobalForMedia + signedMediaPath(id, target);
+  return entry.publicBase + signedMediaPath(id, target);
 }
 let baseGlobalForMedia = "http://127.0.0.1:" + PORT;
 function setBaseGlobal(req) { baseGlobalForMedia = baseFromRequest(req); }
@@ -423,6 +423,16 @@ async function route(req, res) {
         saveConfig();
         return json(res, 200, { ok: true, config: publicConfig() });
       } catch (e) { return json(res, e.statusCode || 400, { ok: false, error: errText(e) }); }
+    }
+    if (url.pathname === "/api/admin/server/status" && req.method === "GET") {
+      try {
+        const heartbeat = await serverJson("heartbeat", { timeout: 3500 });
+        let settings = {};
+        try { settings = await serverJson("settings", { timeout: 3500 }); } catch {}
+        return json(res, 200, { ok: true, connected: true, streamingServerUrl: config.streamingServerUrl, heartbeat, settings, cacheSize: config.cacheSize, addonCount: config.addons.length });
+      } catch (e) {
+        return json(res, 200, { ok: true, connected: false, streamingServerUrl: config.streamingServerUrl, error: errText(e), addonCount: config.addons.length });
+      }
     }
     if (url.pathname === "/api/admin/test-addon" && req.method === "POST") {
       try {
