@@ -92,11 +92,17 @@ end function
 function normalizeManifestUrl(rawUrl as String) as String
     url = Trim(rawUrl)
     if Len(url) = 0 then return ""
-    if Right(LCase(url), 13) = "manifest.json" then return url
-    if Right(url, 1) = "/" then
-        return url + "manifest.json"
+
+    query = ""
+    queryAt = Instr(1, url, "?")
+    if queryAt > 0 then
+        query = Mid(url, queryAt)
+        url = Left(url, queryAt - 1)
     end if
-    return url + "/manifest.json"
+
+    if Right(LCase(url), 13) = "manifest.json" then return url + query
+    if Right(url, 1) = "/" then return url + "manifest.json" + query
+    return url + "/manifest.json" + query
 end function
 
 function makeResourceUrl(manifestUrl as String, resource as String, mediaType as String, mediaId as String) as String
