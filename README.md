@@ -12,7 +12,7 @@ Siga os passos nesta ordem. Todos os comandos abaixo são executados no terminal
 
 ```sh
 sudo pacman -Syu
-sudo pacman -S --needed git nodejs npm zip unzip curl ffmpeg docker
+sudo pacman -S --needed git nodejs npm zip unzip curl ffmpeg docker flatpak
 ```
 
 - `nodejs` e `npm`: executam e testam o companion.
@@ -44,9 +44,19 @@ Se já clonou o repositório anteriormente, atualize-o antes de continuar:
 git pull
 ```
 
-### 3. Inicie o Stremio Streaming Server
+### 3. Instale o Stremio Desktop (opcional) e confirme o Streaming Server
 
-Primeiro confira se já existe um Streaming Server ativo:
+Se quiser também usar o aplicativo Stremio no CachyOS, instale a versão oficial do Flathub:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub com.stremio.Stremio
+flatpak run com.stremio.Stremio
+```
+
+Abra o Stremio e entre na sua conta normalmente. **Este port não importa a conta nem sincroniza os add-ons automaticamente**; os manifestos usados pelo Roku devem ser cadastrados manualmente no painel do companion.
+
+Agora confirme se o Streaming Server local já está acessível:
 
 ```sh
 curl -i --max-time 3 http://127.0.0.1:11470/heartbeat
