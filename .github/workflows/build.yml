@@ -18,6 +18,8 @@ jobs:
         run: npm install --global brighterscript
       - name: Check companion JavaScript syntax
         run: npm --prefix companion run check
+      - name: Smoke-test companion pairing and configuration
+        run: npm --prefix companion run test:smoke
       - name: Validate Roku BrightScript and SceneGraph
         run: bsc --create-package false --copy-to-staging false
       - name: Package Roku app and PC companion
