@@ -420,11 +420,40 @@ sub onMenuSelected()
     end if
 end sub
 
+sub openWelcomeDialog()
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = "Stremio para Roku"
+    dialog.message = "Para começar, inicie o Companion no PC. A TV valida o serviço e o Streaming Server antes de solicitar o PIN."
+    dialog.buttons = ["Configurar PC", "Tentar conexão salva", "Fechar"]
+    dialog.observeField("buttonSelected", "onWelcomeSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onWelcomeSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    m.top.dialog = invalid
+    if selected = 0 then
+        openKeyboard("Endereço do PC", "Digite a URL do Companion mostrada no terminal, por exemplo http://192.168.1.50:17890. O app validará o serviço antes de pedir o PIN.", "bridgeUrl")
+    else if selected = 1 then
+        if Len(m.bridgeUrl) = 0 then
+            openKeyboard("Endereço do PC", "Digite a URL do Companion, por exemplo http://192.168.1.50:17890.", "bridgeUrl")
+        else
+            m.pendingBridgeUrl = m.bridgeUrl
+            m.probePurpose = "connect"
+            task = createTask("probe")
+            if task <> invalid then runTask(task)
+            m.status.text = "Validando Companion e Streaming Server…"
+        end if
+    end if
+end sub
+
 sub openMoreMenu()
     dialog = CreateObject("roSGNode", "Dialog")
-    dialog.title = "Stremio for Roku"
-    dialog.message = "Mais opções"
-    dialog.buttons = ["Conectar ao PC", "Estado do servidor", "Painel de add-ons", "Voltar"]
+    dialog.title = "Stremio para Roku"
+    dialog.message = "Conta, biblioteca e configurações"
+    dialog.buttons = ["Conectar ao PC", "Conta Stremio", "Minha biblioteca", "Mais opções", "Voltar"]
     dialog.observeField("buttonSelected", "onMoreMenuSelected")
     m.top.dialog = dialog
 end sub
@@ -435,15 +464,156 @@ sub onMoreMenuSelected()
     selected = dialog.buttonSelected
     m.top.dialog = invalid
     if selected = 0 then
-        openKeyboard("Conectar ao PC", "Digite o endereço do companion, incluindo a porta. Ex.: http://192.168.15.10:17890", "bridgeUrl")
+        openKeyboard("Endereço do PC", "Digite a URL do Companion, por exemplo http://192.168.1.50:17890. O serviço será validado antes de pedir o PIN.", "bridgeUrl")
+    else if selected = 1 then
+        openAccountMenu()
+    else if selected = 2 then
+        loadLibrary("all")
+    else if selected = 3 then
+        openToolsMenu()
+    end if
+end sub
+
+sub openAccountMenu()
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = "Conta Stremio"
+    dialog.message = "Vincule a conta por código usando um celular ou PC; não precisa digitar a senha na TV."
+    dialog.buttons = ["Vincular conta", "Verificar vínculo", "Atualizar conta", "Sair da conta", "Voltar"]
+    dialog.observeField("buttonSelected", "onAccountMenuSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onAccountMenuSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    m.top.dialog = invalid
+    if selected = 0 then
+        task = createTask("accountLinkStart")
+        if task <> invalid then runTask(task)
+    else if selected = 1 then
+        if Len(m.pendingAccountCode) = 0 then
+            showMessage("Conta Stremio", "Nenhum código pendente. Escolha Vincular conta para gerar um código.")
+        else
+            task = createTask("accountLinkCheck")
+            if task <> invalid then
+                task.mediaId = m.pendingAccountCode
+                runTask(task)
+            end if
+        end if
+    else if selected = 2 then
+        task = createTask("accountSync")
+        if task <> invalid then runTask(task)
+    else if selected = 3 then
+        task = createTask("accountLogout")
+        if task <> invalid then runTask(task)
+    end if
+end sub
+
+sub openToolsMenu()
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = "Mais opções"
+    dialog.message = "Diagnóstico e progresso"
+    dialog.buttons = ["Continuar assistindo", "Estado do servidor", "Painel do Companion", "Voltar"]
+    dialog.observeField("buttonSelected", "onToolsMenuSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onToolsMenuSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    m.top.dialog = invalid
+    if selected = 0 then
+        loadLibrary("continue")
     else if selected = 1 then
         task = createTask("serverStatus")
         if task <> invalid then runTask(task)
     else if selected = 2 then
         if Len(m.bridgeUrl) > 0 then
-            showMessage("Painel do companion", "Abra no navegador do PC: " + m.bridgeUrl + "/")
+            showMessage("Painel do Companion", "Abra no PC: " + m.bridgeUrl + "/")
         else
-            showMessage("Painel do companion", "Inicie companion/start-windows.bat ou companion/start-linux.sh no PC e abra o endereço mostrado no terminal.")
+            showMessage("Painel do Companion", "Inicie companion/start-linux.sh no CachyOS e abra o endereço LAN mostrado no terminal.")
+        end if
+    end if
+end sub
+
+sub loadLibrary(mode as String)
+    if Len(m.bridgeToken) = 0 or Len(m.bridgeUrl) = 0 then
+        showMessage("Minha biblioteca", "Conecte primeiro ao Companion do PC.")
+        return
+    end if
+    m.pendingLibraryMode = mode
+    task = createTask("accountLibrary")
+    if task = invalid then return
+    task.mediaType = mode
+    runTask(task)
+    m.status.text = "Carregando sua biblioteca Stremio…"
+end sub
+
+sub showProbeFailure(title as String, message as String, serverDown as Boolean)
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = title
+    dialog.message = message
+    if serverDown then
+        dialog.buttons = ["Tentar de novo", "Vincular mesmo assim", "Cancelar"]
+        m.dialogPurpose = "probeServerDown"
+    else
+        dialog.buttons = ["Tentar outro endereço", "Cancelar"]
+        m.dialogPurpose = "probeInvalid"
+    end if
+    dialog.observeField("buttonSelected", "onProbeFailureSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onProbeFailureSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    purpose = m.dialogPurpose
+    m.top.dialog = invalid
+    if purpose = "probeServerDown" then
+        if selected = 0 then
+            task = createTask("probe")
+            if task <> invalid then runTask(task)
+            m.status.text = "Verificando novamente…"
+        else if selected = 1 then
+            openKeyboard("PIN do Companion", "O Companion respondeu, mas o Streaming Server não. Você pode vincular a conta, mas a reprodução pode falhar. Digite o PIN do PC.", "bridgePin")
+        else
+            openWelcomeDialog()
+        end if
+    else if purpose = "probeInvalid" then
+        if selected = 0 then
+            openKeyboard("Endereço do PC", "Confira o endereço LAN e a porta do Companion no terminal do PC.", "bridgeUrl")
+        else
+            openWelcomeDialog()
+        end if
+    end if
+    m.dialogPurpose = ""
+end sub
+
+sub showAccountLinkDialog(result as Object)
+    link = "Link de vinculação não retornado."
+    if result.link <> invalid and Len(result.link) > 0 then link = result.link
+    message = "1. No celular ou PC, abra:" + Chr(10) + link + Chr(10) + Chr(10) + "2. Entre na conta Stremio e conclua a vinculação." + Chr(10) + "3. Código: " + m.pendingAccountCode + Chr(10) + Chr(10) + "Depois volte à TV e escolha Conta Stremio → Verificar vínculo."
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = "Vincular conta Stremio"
+    dialog.message = message
+    dialog.buttons = ["Verificar vínculo", "Fechar"]
+    dialog.observeField("buttonSelected", "onAccountLinkDialogSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onAccountLinkDialogSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    m.top.dialog = invalid
+    if selected = 0 and Len(m.pendingAccountCode) > 0 then
+        task = createTask("accountLinkCheck")
+        if task <> invalid then
+            task.mediaId = m.pendingAccountCode
+            runTask(task)
         end if
     end if
 end sub
