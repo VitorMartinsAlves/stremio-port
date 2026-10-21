@@ -5,6 +5,7 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -31,7 +32,8 @@ function loadConfig() {
       streamingServerUrl: cleanBase(raw.streamingServerUrl || process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
       publicBaseUrl: String(raw.publicBaseUrl || "").replace(/\/+$/, ""),
       addons: Array.isArray(raw.addons) ? raw.addons.filter(x => typeof x === "string") : [],
-      cacheSize: Number.isFinite(Number(raw.cacheSize)) ? Number(raw.cacheSize) : 2147483648
+      cacheSize: Number.isFinite(Number(raw.cacheSize)) ? Number(raw.cacheSize) : 2147483648,
+      transcodeTorrents: raw.transcodeTorrents !== false
     };
   } catch {
     return {
@@ -40,7 +42,8 @@ function loadConfig() {
       streamingServerUrl: cleanBase(process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
       publicBaseUrl: "",
       addons: [],
-      cacheSize: 2147483648
+      cacheSize: 2147483648,
+      transcodeTorrents: true
     };
   }
 }
@@ -52,6 +55,11 @@ const sessions = new Map();
 const mediaEntries = new Map();
 const MAX_MEDIA_ENTRIES = 1500;
 const MEDIA_TTL = 45 * 60 * 1000;
+const TRANSCODE_DIR = path.join(DATA_DIR, "transcodes");
+fs.mkdirSync(TRANSCODE_DIR, { recursive: true });
+const playbackEntries = new Map();
+const transcodeSessions = new Map();
+let ffmpegAvailablePromise = null;
 
 function json(res, code, data) {
   const body = JSON.stringify(data);
@@ -117,7 +125,7 @@ function requireSession(req, res) {
   return true;
 }
 function publicConfig() {
-  return { streamingServerUrl: config.streamingServerUrl, publicBaseUrl: config.publicBaseUrl, addons: config.addons, cacheSize: config.cacheSize, port: PORT, version: VERSION };
+  return { streamingServerUrl: config.streamingServerUrl, publicBaseUrl: config.publicBaseUrl, addons: config.addons, cacheSize: config.cacheSize, transcodeTorrents: config.transcodeTorrents, port: PORT, version: VERSION };
 }
 function baseFromRequest(req) {
   if (config.publicBaseUrl) return config.publicBaseUrl;
@@ -160,9 +168,71 @@ function listAddons() {
     try { return normalizeManifestUrl(raw).href; } catch { return null; }
   }).filter(Boolean);
 }
-function addMediaEntry(url, headers = {}) {
+function addMediaEntry(url, headers = {}, publicBase = baseGlobalForMedia, streamFormat = "mp4") {
   const id = crypto.randomBytes(18).toString("base64url");
-  mediaEntries.set(id, { url: String(url), headers, publicBase: baseGlobalForMedia, expires: Date.now() + MEDIA_TTL });
+  mediaEntries.set(id, { url: String(url), headers, publicBase, streamFormat, expires: Date.now() + MEDIA_TTL });
+  playbackEntries.set(id, { kind: "url", url: String(url), headers, streamFormat, expires: Date.now() + MEDIA_TTL });
+  return id;
+}
+function guessFormat(rawUrl, filename = "") {
+  const candidate = String(filename || rawUrl || "").toLowerCase().split("?")[0].split("#")[0];
+  if (candidate.endsWith(".m3u8")) return "hls";
+  if (candidate.endsWith(".mpd")) return "dash";
+  return "mp4";
+}
+function checkFfmpeg() {
+  if (!ffmpegAvailablePromise) {
+    ffmpegAvailablePromise = new Promise(resolve => {
+      const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", ["-version"], { stdio: "ignore", windowsHide: true });
+      child.once("error", () => resolve(false));
+      child.once("exit", code => resolve(code === 0));
+    });
+  }
+  return ffmpegAvailablePromise;
+}
+function addTorrentPlayback(stream, streamUrl, idx) {
+  const id = crypto.randomBytes(18).toString("base64url");
+  playbackEntries.set(id, {
+    kind: "torrent", url: streamUrl, infoHash: String(stream.infoHash || "").toLowerCase(),
+    fileIdx: idx, title: stream.name || stream.title || "Torrent",
+    streamFormat: guessFormat(streamUrl, stream.behaviorHints?.filename),
+    expires: Date.now() + MEDIA_TTL
+  });
+  return id;
+}
+async function startTranscode(id, entry, req) {
+  const old = transcodeSessions.get(id);
+  if (old && old.expires > Date.now()) return old;
+  const dir = path.join(TRANSCODE_DIR, id);
+  fs.mkdirSync(dir, { recursive: true });
+  const playlist = path.join(dir, "index.m3u8");
+  const segment = path.join(dir, "segment%06d.ts");
+  const args = [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-i", entry.url, "-map", "0:v:0?", "-map", "0:a:0?",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
+    "-vf", "scale=w='min(1280,iw)':h=-2",
+    "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+    "-f", "hls", "-hls_time", "6", "-hls_list_size", "10",
+    "-hls_flags", "delete_segments+append_list+omit_endlist",
+    "-hls_segment_filename", segment, playlist
+  ];
+  const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", args, {
+    stdio: ["ignore", "ignore", "pipe"], windowsHide: true
+  });
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-3000); });
+  const session = { child, dir, expires: Date.now() + MEDIA_TTL, stderr: () => stderr };
+  transcodeSessions.set(id, session);
+  child.once("exit", () => { session.expires = Date.now() + 10 * 60 * 1000; });
+  const started = Date.now();
+  while (Date.now() - started < 25000) {
+    if (fs.existsSync(playlist) && fs.readdirSync(dir).some(name => name.endsWith(".ts"))) return session;
+    if (child.exitCode !== null) throw new Error("FFmpeg terminou sem gerar HLS: " + (stderr || "verifique os codecs e a fonte."));
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+  throw new Error("FFmpeg não conseguiu iniciar a transcodificação em 25 s: " + (stderr || "a fonte ainda pode estar carregando."));
+}
   if (mediaEntries.size > MAX_MEDIA_ENTRIES) {
     for (const [key, item] of mediaEntries) if (item.expires < Date.now()) mediaEntries.delete(key);
     while (mediaEntries.size > MAX_MEDIA_ENTRIES) mediaEntries.delete(mediaEntries.keys().next().value);
@@ -251,6 +321,8 @@ async function createTorrentStream(stream, req) {
   const idx = Number.isInteger(Number(stream.fileIdx)) && Number(stream.fileIdx) >= 0 ? Number(stream.fileIdx) : -1;
   return {
     url: baseFromRequest(req) + "/media/torrent/" + hash + "/" + idx,
+    playbackId: addTorrentPlayback(stream, config.streamingServerUrl + "/" + hash + "/" + idx, idx),
+    streamFormat: guessFormat("", stream.behaviorHints?.filename),
     name: stream.name || stream.title || "Torrent",
     description: stream.description || "",
     sourceType: "torrent",
@@ -292,9 +364,12 @@ async function getStreams(type, videoId, req) {
         item = await createTorrentStream(stream, req);
       } else if (typeof stream.url === "string" && /^https?:\/\//i.test(stream.url)) {
         const headers = streamHeaders(stream);
-        const id = addMediaEntry(stream.url, headers);
+        const format = guessFormat(stream.url, stream.behaviorHints?.filename);
+        const id = addMediaEntry(stream.url, headers, baseFromRequest(req), format);
         item = {
           url: mediaUrl(req, id, stream.url),
+          playbackId: id,
+          streamFormat: format,
           name: stream.name || stream.title || stream.behaviorHints?.filename || "Stream direto",
           description: stream.description || "",
           sourceType: "url"
@@ -411,6 +486,7 @@ async function route(req, res) {
         const body = await parseBody(req);
         if (body.streamingServerUrl !== undefined) config.streamingServerUrl = cleanBase(body.streamingServerUrl);
         if (body.publicBaseUrl !== undefined) config.publicBaseUrl = body.publicBaseUrl ? cleanBase(body.publicBaseUrl) : "";
+        if (body.transcodeTorrents !== undefined) config.transcodeTorrents = Boolean(body.transcodeTorrents);
         if (body.cacheSize !== undefined) {
           const n = Number(body.cacheSize);
           if (!Number.isInteger(n) || n < 0 || n > 17179869184) throw new Error("Cache deve estar entre 0 e 16 GiB.");
@@ -471,6 +547,23 @@ async function route(req, res) {
         const meta = await getMeta("series", url.searchParams.get("id") || "");
         return json(res, 200, { ok: true, episodes: meta.videos || [], meta });
       }
+      if (url.pathname === "/api/playback" && req.method === "GET") {
+        const id = url.searchParams.get("id") || "";
+        const entry = playbackEntries.get(id);
+        if (!entry || entry.expires < Date.now()) return json(res, 410, { ok: false, error: "Sessão de reprodução expirada. Selecione a fonte novamente." });
+        if (entry.kind === "torrent" && config.transcodeTorrents && await checkFfmpeg()) {
+          try {
+            await startTranscode(id, entry, req);
+            return json(res, 200, { ok: true, url: baseFromRequest(req) + "/transcodes/" + id + "/index.m3u8", streamFormat: "hls", transcoded: true, title: entry.title });
+          } catch (e) {
+            return json(res, 200, { ok: true, url: baseFromRequest(req) + "/media/torrent/" + entry.infoHash + "/" + entry.fileIdx, streamFormat: entry.streamFormat || "mp4", transcoded: false, warning: errText(e), title: entry.title });
+          }
+        }
+        const playUrl = entry.kind === "torrent"
+          ? baseFromRequest(req) + "/media/torrent/" + entry.infoHash + "/" + entry.fileIdx
+          : mediaUrl(req, id, entry.url);
+        return json(res, 200, { ok: true, url: playUrl, streamFormat: entry.streamFormat || "mp4", transcoded: false, title: entry.title || "" });
+      }
       if (url.pathname === "/api/streams" && req.method === "GET") {
         const type = url.searchParams.get("type") || "movie";
         const videoId = url.searchParams.get("videoId") || "";
@@ -505,6 +598,24 @@ async function route(req, res) {
     } catch (e) { return json(res, e.statusCode || 502, { ok: false, error: errText(e) }); }
   }
 
+  const transcodeMatch = url.pathname.match(/^\/transcodes\/([A-Za-z0-9_-]{10,})\/(index\.m3u8|segment\d{6}\.ts)$/);
+  if (transcodeMatch && ["GET", "HEAD"].includes(req.method)) {
+    const id = transcodeMatch[1], filename = transcodeMatch[2];
+    const session = transcodeSessions.get(id);
+    if (!session || session.expires < Date.now()) return json(res, 410, { ok: false, error: "Transcodificação expirada." });
+    const filePath = path.join(session.dir, filename);
+    if (!fs.existsSync(filePath)) return json(res, 404, { ok: false, error: "Segmento ainda não foi gerado." });
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, {
+      "Content-Type": filename.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp2t",
+      "Content-Length": stat.size,
+      "Cache-Control": filename.endsWith(".m3u8") ? "no-cache" : "public, max-age=60",
+      "Access-Control-Allow-Origin": "*",
+      "Accept-Ranges": "none"
+    });
+    if (req.method === "HEAD") return res.end();
+    return fs.createReadStream(filePath).pipe(res);
+  }
   const torrent = url.pathname.match(/^\/media\/torrent\/([a-f0-9]{40})\/(-?\d+)$/i);
   if (torrent && ["GET", "HEAD"].includes(req.method)) return proxyRequest(req, res, config.streamingServerUrl + "/" + torrent[1] + "/" + torrent[2]);
   const media = url.pathname.match(/^\/media\/([A-Za-z0-9_-]{10,})\/([a-f0-9]{64})\/([A-Za-z0-9_-]+)$/);
