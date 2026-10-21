@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="StremioTask" extends="Task">
+    <interface>
+        <field id="action" type="string" />
+        <field id="mediaType" type="string" />
+        <field id="mediaId" type="string" />
+        <field id="query" type="string" />
+        <field id="addonUrl" type="string" />
+        <field id="addonUrls" type="array" />
+        <field id="result" type="assocarray" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/StremioTask.brs" />
+</component>
