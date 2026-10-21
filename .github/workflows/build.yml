@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Package Roku app
-        run: ./scripts/package.sh
+        run: sh ./scripts/package.sh
       - name: Upload sideload ZIP
         uses: actions/upload-artifact@v4
         with:
