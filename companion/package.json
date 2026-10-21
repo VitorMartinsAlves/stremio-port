@@ -6,7 +6,8 @@
   "description": "Companion on the LAN for the Stremio Roku port",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs"
+    "check": "node --check server.mjs",
+    "test:smoke": "node test/smoke.mjs"
   },
   "engines": {
     "node": ">=20"
