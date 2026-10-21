@@ -32,6 +32,9 @@ function loadConfig() {
       streamingServerUrl: cleanBase(raw.streamingServerUrl || process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
       publicBaseUrl: String(raw.publicBaseUrl || "").replace(/\/+$/, ""),
       addons: Array.isArray(raw.addons) ? raw.addons.filter(x => typeof x === "string") : [],
+      accountAddons: Array.isArray(raw.accountAddons) ? raw.accountAddons.filter(x => typeof x === "string") : [],
+      stremioAuthKey: typeof raw.stremioAuthKey === "string" ? raw.stremioAuthKey : "",
+      stremioUser: raw.stremioUser && typeof raw.stremioUser === "object" ? raw.stremioUser : null,
       cacheSize: Number.isFinite(Number(raw.cacheSize)) ? Number(raw.cacheSize) : 2147483648,
       transcodeTorrents: raw.transcodeTorrents !== false
     };
@@ -42,6 +45,9 @@ function loadConfig() {
       streamingServerUrl: cleanBase(process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
       publicBaseUrl: "",
       addons: [],
+      accountAddons: [],
+      stremioAuthKey: "",
+      stremioUser: null,
       cacheSize: 2147483648,
       transcodeTorrents: true
     };
@@ -144,7 +150,21 @@ function requireSession(req, res) {
   return true;
 }
 function publicConfig() {
-  return { streamingServerUrl: config.streamingServerUrl, publicBaseUrl: config.publicBaseUrl, addons: config.addons, cacheSize: config.cacheSize, transcodeTorrents: config.transcodeTorrents, port: PORT, version: VERSION };
+  return {
+    streamingServerUrl: config.streamingServerUrl,
+    publicBaseUrl: config.publicBaseUrl,
+    addons: config.addons,
+    accountAddons: config.accountAddons || [],
+    account: {
+      authenticated: Boolean(config.stremioAuthKey),
+      email: config.stremioUser?.email || "",
+      userId: config.stremioUser?._id || config.stremioUser?.id || ""
+    },
+    cacheSize: config.cacheSize,
+    transcodeTorrents: config.transcodeTorrents,
+    port: PORT,
+    version: VERSION
+  };
 }
 function baseFromRequest(req) {
   if (config.publicBaseUrl) return config.publicBaseUrl;
@@ -183,9 +203,10 @@ async function getJson(rawUrl, options = {}) {
 }
 function errText(error) { return String(error?.message || error || "Erro desconhecido").slice(0, 400); }
 function listAddons() {
-  return config.addons.map(raw => {
+  const urls = [...(config.addons || []), ...(config.accountAddons || [])];
+  return [...new Set(urls.map(raw => {
     try { return normalizeManifestUrl(raw).href; } catch { return null; }
-  }).filter(Boolean);
+  }).filter(Boolean))];
 }
 function addMediaEntry(url, headers = {}, publicBase = baseGlobalForMedia, streamFormat = "mp4") {
   const id = crypto.randomBytes(18).toString("base64url");
@@ -411,6 +432,112 @@ async function getStreams(type, videoId, req) {
   }
   return result.slice(0, 80);
 }
+async function stremioApiRequest(method, params = {}) {
+  const response = await fetch("https://api.strem.io/api/" + encodeURIComponent(method), {
+    method: "POST",
+    headers: { "content-type": "application/json", "accept": "application/json", "user-agent": "Stremio-Roku-Bridge/" + VERSION },
+    body: JSON.stringify(params),
+    signal: AbortSignal.timeout(12000)
+  });
+  const bodyText = await response.text();
+  let body;
+  try { body = bodyText ? JSON.parse(bodyText) : {}; } catch { throw new Error("A API da conta Stremio retornou uma resposta inválida."); }
+  if (!response.ok) throw new Error("A API da conta Stremio respondeu HTTP " + response.status + ".");
+  if (body.error) {
+    const message = typeof body.error === "string" ? body.error : (body.error.message || "Erro na API Stremio.");
+    throw new Error(String(message).slice(0, 240));
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "result")) return body.result;
+  return body;
+}
+async function linkApiRequest(kind, code = "") {
+  const endpoint = new URL("https://link.stremio.com/v2/" + (kind === "create" ? "create" : "read"));
+  endpoint.searchParams.set("type", kind === "create" ? "Create" : "Read");
+  if (kind !== "create") endpoint.searchParams.set("code", code);
+  const response = await fetch(endpoint, {
+    headers: { accept: "application/json", "user-agent": "Stremio-Roku-Bridge/" + VERSION },
+    signal: AbortSignal.timeout(12000)
+  });
+  const text = await response.text();
+  let payload;
+  try { payload = text ? JSON.parse(text) : {}; } catch { throw new Error("O serviço de vinculação Stremio retornou uma resposta inválida."); }
+  if (!response.ok) throw new Error("O serviço de vinculação Stremio respondeu HTTP " + response.status + ".");
+  if (payload.error) throw new Error(typeof payload.error === "string" ? payload.error : payload.error.message || "Falha de vinculação.");
+  return payload.result || payload;
+}
+function safeUser(user) {
+  if (!user || typeof user !== "object") return null;
+  return {
+    _id: user._id || user.id || "",
+    email: user.email || "",
+    username: user.username || "",
+    avatar: user.avatar || ""
+  };
+}
+function addonDescriptorUrl(descriptor) {
+  if (!descriptor || typeof descriptor !== "object") return "";
+  return descriptor.transportUrl || descriptor.transport_url || descriptor.url || descriptor.endpoint || "";
+}
+function normalizeLibraryItem(item) {
+  if (!item || typeof item !== "object" || item.removed === true) return null;
+  const meta = item.meta || item.content || item.item || item;
+  const id = item.id || meta.id || item._id;
+  const type = item.type || meta.type;
+  const name = item.name || meta.name || item.title || meta.title;
+  if (!id || !name || !["movie", "series"].includes(String(type).toLowerCase())) return null;
+  return {
+    id: String(id),
+    type: String(type).toLowerCase(),
+    name: String(name),
+    title: String(name),
+    poster: item.poster || meta.poster || "",
+    background: item.background || meta.background || "",
+    year: item.year || meta.year || "",
+    genres: item.genres || meta.genres || [],
+    state: item.state || {},
+    removed: false
+  };
+}
+async function loadAccountSnapshot(authKey) {
+  const results = { user: null, addonUrls: [], library: [], warnings: [] };
+  try {
+    const user = await stremioApiRequest("getUser", { authKey });
+    if (user && typeof user === "object") results.user = safeUser(user);
+  } catch (error) { results.warnings.push("Não foi possível atualizar o perfil: " + errText(error)); }
+  try {
+    const collection = await stremioApiRequest("addonCollectionGet", { authKey, update: true });
+    const descriptors = Array.isArray(collection.addons) ? collection.addons : [];
+    results.addonUrls = [...new Set(descriptors.map(addonDescriptorUrl).filter(Boolean).map(raw => {
+      try { return normalizeManifestUrl(raw).href; } catch { return ""; }
+    }).filter(Boolean))];
+    if (!descriptors.length && config.accountAddons.length) results.addonUrls = [];
+  } catch (error) { results.warnings.push("A lista de add-ons da conta não foi sincronizada: " + errText(error)); }
+  try {
+    const libraryResponse = await stremioApiRequest("datastoreGet", { authKey, collection: "libraryItem", ids: [], all: true });
+    const source = Array.isArray(libraryResponse) ? libraryResponse : (Array.isArray(libraryResponse.items) ? libraryResponse.items : []);
+    results.library = source.map(normalizeLibraryItem).filter(Boolean);
+  } catch (error) { results.warnings.push("A biblioteca da conta não foi sincronizada: " + errText(error)); }
+  return results;
+}
+async function attachStremioAuthKey(candidateKey) {
+  if (!candidateKey || typeof candidateKey !== "string") throw new Error("A vinculação não retornou uma chave de sessão válida.");
+  const authResult = await stremioApiRequest("loginWithToken", { token: candidateKey });
+  const authKey = authResult.authKey || authResult.auth_key || candidateKey;
+  const user = safeUser(authResult.user);
+  if (!user || (!user._id && !user.email)) throw new Error("O Stremio não confirmou a conta vinculada. Tente novamente.");
+  config.stremioAuthKey = authKey;
+  config.stremioUser = user;
+  const snapshot = await loadAccountSnapshot(authKey);
+  if (snapshot.user) config.stremioUser = snapshot.user;
+  config.accountAddons = snapshot.addonUrls;
+  saveConfig();
+  return { account: publicConfig().account, addonCount: snapshot.addonUrls.length, libraryCount: snapshot.library.length, warnings: snapshot.warnings };
+}
+async function requireStremioAuth() {
+  if (!config.stremioAuthKey) throw new Error("Entre na conta Stremio pela opção Conta Stremio no Roku.");
+  return config.stremioAuthKey;
+}
+
 function pickResponseHeaders(input) {
   const output = {};
   for (const key of ["content-type", "content-length", "content-range", "accept-ranges", "cache-control", "last-modified", "etag", "expires", "transfermode.dlna.org", "contentfeatures.dlna.org"]) {
@@ -492,6 +619,25 @@ async function route(req, res) {
     catch { return html(res, 500, "Dashboard ausente. Baixe o repositório completo."); }
   }
   if (url.pathname === "/api/health" && req.method === "GET") return json(res, 200, { ok: true, version: VERSION, service: "Stremio Roku Bridge" });
+  if (url.pathname === "/api/setup/status" && req.method === "GET") {
+    let streamingServer = { reachable: false, url: config.streamingServerUrl, error: "" };
+    try {
+      const heartbeat = await serverJson("heartbeat", { timeout: 3000 });
+      streamingServer = { reachable: true, url: config.streamingServerUrl, heartbeat };
+    } catch (error) {
+      streamingServer.error = errText(error);
+    }
+    return json(res, 200, {
+      ok: true,
+      service: "Stremio Roku Bridge",
+      version: VERSION,
+      companion: { reachable: true, host: req.headers.host || "", port: PORT },
+      streamingServer,
+      account: publicConfig().account,
+      addOnCount: listAddons().length
+    });
+  }
+
   if (url.pathname === "/api/pair" && req.method === "POST") {
     try {
       const body = await parseBody(req);
@@ -579,6 +725,63 @@ async function route(req, res) {
     if (!requireSession(req, res)) return;
     try {
       if (url.pathname === "/api/config" && req.method === "GET") return json(res, 200, { ok: true, config: publicConfig() });
+      if (url.pathname === "/api/account/status" && req.method === "GET") {
+        const authKey = config.stremioAuthKey;
+        if (!authKey) return json(res, 200, { ok: true, authenticated: false, account: publicConfig().account });
+        return json(res, 200, { ok: true, authenticated: true, account: publicConfig().account, addonCount: (config.accountAddons || []).length });
+      }
+      if (url.pathname === "/api/account/link/start" && req.method === "POST") {
+        const link = await linkApiRequest("create");
+        const code = String(link.code || link.linkCode || "");
+        if (!code) throw new Error("O Stremio não retornou um código de vinculação. Verifique a disponibilidade do serviço de login.");
+        return json(res, 200, {
+          ok: true,
+          code,
+          link: String(link.link || link.url || ""),
+          qrcode: String(link.qrcode || link.qrCode || ""),
+          instructions: "Abra o link em um celular ou PC, entre na conta Stremio e conclua a vinculação com o código mostrado na TV."
+        });
+      }
+      if (url.pathname === "/api/account/link/check" && req.method === "POST") {
+        const body = await parseBody(req);
+        const code = String(body.code || "").trim();
+        if (!/^[A-Za-z0-9-]{3,80}$/.test(code)) throw new Error("Código de vinculação inválido.");
+        let linked;
+        try { linked = await linkApiRequest("read", code); }
+        catch (error) {
+          return json(res, 200, { ok: true, linked: false, message: "Ainda não há uma sessão vinculada. Autorize o código no link Stremio e tente novamente." });
+        }
+        const candidate = linked.authKey || linked.auth_key || linked.token || linked.data?.authKey || linked.data?.auth_key;
+        if (!candidate) return json(res, 200, { ok: true, linked: false, message: "Ainda não há uma sessão vinculada. Autorize o código no link Stremio e tente novamente." });
+        const result = await attachStremioAuthKey(String(candidate));
+        return json(res, 200, { ok: true, linked: true, ...result });
+      }
+      if (url.pathname === "/api/account/sync" && req.method === "POST") {
+        const authKey = await requireStremioAuth();
+        const snapshot = await loadAccountSnapshot(authKey);
+        if (snapshot.user) config.stremioUser = snapshot.user;
+        config.accountAddons = snapshot.addonUrls;
+        saveConfig();
+        return json(res, 200, { ok: true, account: publicConfig().account, addonCount: snapshot.addonUrls.length, libraryCount: snapshot.library.length, warnings: snapshot.warnings });
+      }
+      if (url.pathname === "/api/account/library" && req.method === "GET") {
+        const authKey = await requireStremioAuth();
+        const libraryResponse = await stremioApiRequest("datastoreGet", { authKey, collection: "libraryItem", ids: [], all: true });
+        const source = Array.isArray(libraryResponse) ? libraryResponse : (Array.isArray(libraryResponse.items) ? libraryResponse.items : []);
+        const items = source.map(normalizeLibraryItem).filter(Boolean);
+        return json(res, 200, { ok: true, items, account: publicConfig().account });
+      }
+      if (url.pathname === "/api/account/logout" && req.method === "POST") {
+        if (config.stremioAuthKey) {
+          try { await stremioApiRequest("logout", { authKey: config.stremioAuthKey }); } catch {}
+        }
+        config.stremioAuthKey = "";
+        config.stremioUser = null;
+        config.accountAddons = [];
+        saveConfig();
+        return json(res, 200, { ok: true, account: publicConfig().account });
+      }
+
       if (url.pathname === "/api/server/status" && req.method === "GET") {
         try {
           const heartbeat = await serverJson("heartbeat", { timeout: 3500 });
