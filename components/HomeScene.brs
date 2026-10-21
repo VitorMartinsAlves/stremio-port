@@ -15,21 +15,35 @@ sub init()
     m.availableStreams = []
     m.currentTitle = ""
     m.pendingBridgeUrl = ""
+    m.pendingPin = ""
     m.bridgeUrl = ""
     m.bridgeToken = ""
+    m.probePurpose = ""
+    m.pendingAccountCode = ""
+    m.accountEmail = ""
+    m.previousGridMode = "catalog"
+    m.previousGridType = "movie"
+    m.pendingLibraryMode = "all"
 
     section = CreateObject("roRegistrySection", "StremioRoku")
     storedUrl = section.Read("bridgeUrl")
     storedToken = section.Read("bridgeToken")
+    storedCode = section.Read("accountLinkCode")
     if storedUrl <> invalid then m.bridgeUrl = storedUrl
     if storedToken <> invalid then m.bridgeToken = storedToken
+    if storedCode <> invalid then m.pendingAccountCode = storedCode
 
     m.grid.SetFocus(true)
+    m.footer.text = "Stremio para Roku · pressione * para opções."
     if Len(m.bridgeUrl) > 0 and Len(m.bridgeToken) > 0 then
-        loadCatalog("movie", "")
+        m.pendingBridgeUrl = m.bridgeUrl
+        m.probePurpose = "startup"
+        task = createTask("probe")
+        if task <> invalid then runTask(task)
+        m.status.text = "Verificando a conexão salva…"
     else
-        m.status.text = "Conecte ao PC: pressione * e escolha Conectar ao PC."
-        m.footer.text = "O companion roda no PC e usa o Stremio Streaming Server local."
+        m.status.text = "Configure a conexão com o PC para carregar os catálogos."
+        openWelcomeDialog()
     end if
 end sub
 
@@ -57,7 +71,7 @@ function createTask(action as String) as Object
     end if
     task = CreateObject("roSGNode", "StremioTask")
     task.action = action
-    if action = "pair" then
+    if action = "pair" or action = "probe" then
         task.bridgeUrl = m.pendingBridgeUrl
         task.pin = m.pendingPin
     else
@@ -88,6 +102,37 @@ sub onTaskStateChanged()
         return
     end if
 
+    if action = "probe" then
+        if result.ok <> true or result.service <> "Stremio Roku Bridge" then
+            m.status.text = "Companion não encontrado neste endereço."
+            showProbeFailure("Companion não encontrado", "O endereço não foi reconhecido como Stremio Roku Companion. Confira o IP e a porta exibidos no terminal do PC. O PIN não será solicitado.", false)
+            return
+        end if
+        m.accountEmail = ""
+        if result.account <> invalid and result.account.email <> invalid then m.accountEmail = result.account.email
+        if result.streamingServer = invalid or result.streamingServer.reachable <> true then
+            serverError = "O Companion está acessível, mas o Stremio Streaming Server não respondeu." + Chr(10) + "Endereço configurado no PC: "
+            if result.streamingServer <> invalid and result.streamingServer.url <> invalid then
+                serverError = serverError + result.streamingServer.url
+            else
+                serverError = serverError + "http://127.0.0.1:11470"
+            end if
+            serverError = serverError + Chr(10) + Chr(10) + "Inicie o Stremio Streaming Server no PC e tente novamente. Se continuar sem servidor, você pode optar por vincular mesmo assim, mas a reprodução ficará indisponível."
+            if result.streamingServer <> invalid and result.streamingServer.error <> invalid then serverError = serverError + Chr(10) + result.streamingServer.error
+            m.status.text = "Companion encontrado; Streaming Server indisponível."
+            showProbeFailure("Streaming Server indisponível", serverError, true)
+            return
+        end if
+        if m.probePurpose = "startup" then
+            m.status.text = "PC e Streaming Server validados. Carregando catálogo…"
+            loadCatalog("movie", "")
+        else
+            m.status.text = "Endereço validado. Agora informe o PIN."
+            openKeyboard("PIN do Companion", "O Companion e o Streaming Server responderam. Digite o PIN de seis dígitos exibido no terminal do PC.", "bridgePin")
+        end if
+        return
+    end if
+
     if action = "pair" then
         if result.ok = true and result.token <> invalid then
             m.bridgeUrl = m.pendingBridgeUrl
@@ -104,6 +149,89 @@ sub onTaskStateChanged()
             if result.error <> invalid then message = result.error
             showMessage("Falha ao conectar", message)
             m.status.text = message
+        end if
+        return
+    end if
+
+    if action = "accountLinkStart" then
+        if result.ok = true and result.code <> invalid and Len(result.code) > 0 then
+            m.pendingAccountCode = result.code
+            section = CreateObject("roRegistrySection", "StremioRoku")
+            section.Write("accountLinkCode", m.pendingAccountCode)
+            section.Flush()
+            showAccountLinkDialog(result)
+            m.status.text = "Aguardando a autorização da conta Stremio."
+        else
+            message = "Não foi possível iniciar a vinculação da conta."
+            if result.error <> invalid then message = result.error
+            showMessage("Conta Stremio", message)
+        end if
+        return
+    end if
+    if action = "accountLinkCheck" then
+        if result.ok = true and result.linked = true then
+            m.accountEmail = ""
+            if result.account <> invalid and result.account.email <> invalid then m.accountEmail = result.account.email
+            m.pendingAccountCode = ""
+            section = CreateObject("roRegistrySection", "StremioRoku")
+            section.Delete("accountLinkCode")
+            section.Flush()
+            message = "Conta vinculada com sucesso."
+            if Len(m.accountEmail) > 0 then message = message + Chr(10) + m.accountEmail
+            if result.addonCount <> invalid then message = message + Chr(10) + "Add-ons sincronizados: " + Mid(Str(result.addonCount), 2)
+            if result.libraryCount <> invalid then message = message + Chr(10) + "Itens na biblioteca: " + Mid(Str(result.libraryCount), 2)
+            if result.warnings <> invalid and result.warnings.Count() > 0 then message = message + Chr(10) + Chr(10) + "Aviso: " + result.warnings[0]
+            m.status.text = "Conta Stremio vinculada."
+            showMessage("Conta vinculada", message)
+        else
+            message = "O código ainda não foi autorizado. Abra o link no celular/PC, conclua o vínculo e tente novamente."
+            if result.message <> invalid then message = result.message
+            if result.error <> invalid then message = result.error
+            showMessage("Vínculo pendente", message)
+            m.status.text = "Aguardando autorização pelo navegador."
+        end if
+        return
+    end if
+    if action = "accountStatus" then
+        if result.authenticated = true then
+            m.accountEmail = ""
+            if result.account <> invalid and result.account.email <> invalid then m.accountEmail = result.account.email
+            message = "Conta conectada."
+            if Len(m.accountEmail) > 0 then message = message + Chr(10) + m.accountEmail
+            if result.addonCount <> invalid then message = message + Chr(10) + "Add-ons da conta: " + Mid(Str(result.addonCount), 2)
+            showMessage("Conta Stremio", message)
+            m.status.text = "Conta Stremio conectada."
+        else
+            m.accountEmail = ""
+            showMessage("Conta Stremio", "Nenhuma conta vinculada. Escolha Conta Stremio → Vincular conta.")
+            m.status.text = "Entre na conta para sincronizar sua biblioteca."
+        end if
+        return
+    end if
+    if action = "accountSync" then
+        if result.ok = true then
+            if result.account <> invalid and result.account.email <> invalid then m.accountEmail = result.account.email
+            message = "Sincronização concluída."
+            if Len(m.accountEmail) > 0 then message = message + Chr(10) + m.accountEmail
+            if result.addonCount <> invalid then message = message + Chr(10) + "Add-ons da conta: " + Mid(Str(result.addonCount), 2)
+            if result.libraryCount <> invalid then message = message + Chr(10) + "Itens na biblioteca: " + Mid(Str(result.libraryCount), 2)
+            if result.warnings <> invalid and result.warnings.Count() > 0 then message = message + Chr(10) + Chr(10) + "Aviso: " + result.warnings[0]
+            showMessage("Conta Stremio", message)
+        else
+            message = "Não foi possível sincronizar a conta."
+            if result.error <> invalid then message = result.error
+            showMessage("Conta Stremio", message)
+        end if
+        return
+    end if
+    if action = "accountLogout" then
+        if result.ok = true then
+            m.accountEmail = ""
+            showMessage("Sessão encerrada", "A conta foi desconectada deste Companion.")
+        else
+            message = "Não foi possível sair da conta."
+            if result.error <> invalid then message = result.error
+            showMessage("Conta Stremio", message)
         end if
         return
     end if
