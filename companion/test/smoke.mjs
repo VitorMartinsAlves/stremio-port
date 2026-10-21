@@ -43,6 +43,16 @@ try {
   assert.equal(health.ok, true);
   assert.equal(health.service, "Stremio Roku Bridge");
 
+  const setup = await fetch(base + "/api/setup/status");
+  assert.equal(setup.status, 200);
+  const setupStatus = await setup.json();
+  assert.equal(setupStatus.ok, true);
+  assert.equal(setupStatus.service, "Stremio Roku Bridge");
+  assert.equal(setupStatus.companion.reachable, true);
+  assert.equal(setupStatus.streamingServer.reachable, false);
+  assert.equal(setupStatus.account.authenticated, false);
+  assert.equal(Object.hasOwn(setupStatus, "stremioAuthKey"), false);
+
   const badPair = await fetch(base + "/api/pair", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ pin: "000000" })
