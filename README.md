@@ -1,8 +1,8 @@
 # Stremio para Roku — cliente Roku + companion no CachyOS
 
-Este projeto é um port experimental do Stremio para Roku. O Roku roda o cliente nativo em BrightScript/SceneGraph; o CachyOS roda um serviço auxiliar que consulta catálogos/add-ons e encaminha a reprodução pelo Stremio Streaming Server. O PC precisa permanecer ligado durante a reprodução.
+Este projeto é um port experimental do Stremio para Roku. O Roku roda o cliente nativo em BrightScript/SceneGraph; o CachyOS roda um serviço auxiliar que consulta catálogos, sincroniza add-ons e biblioteca da conta, e encaminha a reprodução pelo Stremio Streaming Server. O PC precisa permanecer ligado durante a reprodução.
 
-> **Importante:** não é o cliente oficial nem possui paridade total. Não importa automaticamente sua conta, biblioteca ou histórico do Stremio. Os add-ons precisam ser cadastrados manualmente. A compatibilidade final deve ser testada no Roku físico.
+> **Importante:** não é o cliente oficial e ainda não possui paridade total. A conta é vinculada por um código do Stremio (sem digitar a senha na TV); a biblioteca e a coleção de add-ons são sincronizadas. A reprodução e os menus precisam ser testados no Roku físico.
 
 ## Guia de instalação no CachyOS (recomendado)
 
