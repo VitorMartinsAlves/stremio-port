@@ -172,6 +172,10 @@ function addMediaEntry(url, headers = {}, publicBase = baseGlobalForMedia, strea
   const id = crypto.randomBytes(18).toString("base64url");
   mediaEntries.set(id, { url: String(url), headers, publicBase, streamFormat, expires: Date.now() + MEDIA_TTL });
   playbackEntries.set(id, { kind: "url", url: String(url), headers, streamFormat, expires: Date.now() + MEDIA_TTL });
+  if (mediaEntries.size > MAX_MEDIA_ENTRIES) {
+    for (const [key, item] of mediaEntries) if (item.expires < Date.now()) mediaEntries.delete(key);
+    while (mediaEntries.size > MAX_MEDIA_ENTRIES) mediaEntries.delete(mediaEntries.keys().next().value);
+  }
   return id;
 }
 function guessFormat(rawUrl, filename = "") {
@@ -232,12 +236,6 @@ async function startTranscode(id, entry, req) {
     await new Promise(resolve => setTimeout(resolve, 400));
   }
   throw new Error("FFmpeg não conseguiu iniciar a transcodificação em 25 s: " + (stderr || "a fonte ainda pode estar carregando."));
-}
-  if (mediaEntries.size > MAX_MEDIA_ENTRIES) {
-    for (const [key, item] of mediaEntries) if (item.expires < Date.now()) mediaEntries.delete(key);
-    while (mediaEntries.size > MAX_MEDIA_ENTRIES) mediaEntries.delete(mediaEntries.keys().next().value);
-  }
-  return id;
 }
 function signedMediaPath(id, rawUrl) {
   const target = safeHttpUrl(rawUrl).href;
