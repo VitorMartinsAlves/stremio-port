@@ -54,7 +54,10 @@ function loadConfig() {
   }
 }
 let config = loadConfig();
-function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 }); }
+function saveConfig() {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+}
 saveConfig();
 
 const sessions = new Map();
