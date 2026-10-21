@@ -244,7 +244,24 @@ sub onTaskStateChanged()
         return
     end if
 
-    if action = "catalog" then
+    if action = "accountLibrary" then
+        if result.items <> invalid then
+            if m.pendingLibraryMode = "continue" then
+                continueItems = []
+                for each libraryItem in result.items
+                    if libraryItem.progress <> invalid and libraryItem.progress > 0.01 and libraryItem.progress < 0.7 then continueItems.Push(libraryItem)
+                end for
+                populateGrid(continueItems, "continue")
+                m.status.text = "Continuar assistindo · " + Mid(Str(m.items.Count()), 2) + " itens"
+            else
+                populateGrid(result.items, "library")
+                m.status.text = "Minha biblioteca · " + Mid(Str(m.items.Count()), 2) + " itens"
+            end if
+        else
+            m.status.text = "Não foi possível carregar sua biblioteca."
+            showMessage("Minha biblioteca", "Verifique se a conta Stremio está vinculada e tente Atualizar conta.")
+        end if
+    else if action = "catalog" then
         if result.metas <> invalid then
             populateGrid(result.metas, "catalog")
             if m.currentQuery <> "" then
@@ -352,6 +369,12 @@ sub onGridItemSelected()
 
     m.currentTitle = "Título selecionado"
     if item.name <> invalid then m.currentTitle = item.name
+    if m.contentMode = "library" or m.contentMode = "continue" then
+        m.previousGridMode = m.contentMode
+        if item.type <> invalid then m.currentType = item.type
+    else
+        m.previousGridMode = "catalog"
+    end if
     if m.currentType = "series" then
         if item.id = invalid then return
         task = createTask("episodes")
@@ -363,7 +386,7 @@ sub onGridItemSelected()
         if item.id = invalid then return
         task = createTask("streams")
         if task = invalid then return
-        task.mediaType = "movie"
+        task.mediaType = m.currentType
         task.mediaId = item.id
         runTask(task)
         m.status.text = "Buscando fontes para " + m.currentTitle + "…"
@@ -384,7 +407,13 @@ function onKeyEvent(key as String, press as Boolean) as Boolean
             m.grid.SetFocus(true)
             return true
         else if m.contentMode = "episodes" then
-            loadCatalog("series", "")
+            if m.previousGridMode = "library" then
+                loadLibrary("all")
+            else if m.previousGridMode = "continue" then
+                loadLibrary("continue")
+            else
+                loadCatalog("series", "")
+            end if
             return true
         end if
     end if
@@ -643,15 +672,28 @@ sub onKeyboardSelected()
     else if purpose = "bridgeUrl" then
         m.pendingBridgeUrl = value
         if Left(LCase(value), 7) <> "http://" and Left(LCase(value), 8) <> "https://" then
-            showMessage("Endereço inválido", "Use o formato http://IP-DO-PC:17890")
+            showMessage("Endereço inválido", "Use uma URL como http://192.168.1.50:17890")
             return
         end if
-        openKeyboard("PIN do companion", "Digite o PIN de seis dígitos exibido no terminal do PC.", "bridgePin")
+        if Instr(1, value, " ") > 0 or Instr(1, value, "@") > 0 then
+            showMessage("Endereço inválido", "Informe apenas IP/nome do PC e porta do Companion; não inclua credenciais.")
+            return
+        end if
+        m.probePurpose = "connect"
+        task = createTask("probe")
+        if task <> invalid then
+            m.status.text = "Validando Companion e Streaming Server antes do PIN…"
+            runTask(task)
+        end if
     else if purpose = "bridgePin" then
         m.pendingPin = value
+        if Len(value) < 6 or Len(value) > 16 then
+            showMessage("PIN inválido", "Digite o PIN mostrado no terminal do PC e tente novamente.")
+            return
+        end if
         task = createTask("pair")
         if task <> invalid then
-            m.status.text = "Pareando com o PC…"
+            m.status.text = "Validando PIN e pareando com o PC…"
             runTask(task)
         end if
     end if
