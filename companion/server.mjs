@@ -52,6 +52,7 @@ function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, nul
 saveConfig();
 
 const sessions = new Map();
+const pinAttempts = new Map();
 const mediaEntries = new Map();
 const MAX_MEDIA_ENTRIES = 1500;
 const MEDIA_TTL = 45 * 60 * 1000;
@@ -107,10 +108,28 @@ function safeEqual(a, b) {
   const bb = Buffer.from(String(b));
   return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
 }
-function pinOk(req) { return safeEqual(req.headers["x-bridge-pin"] || "", config.pin); }
+function verifyPin(req, candidate) {
+  const key = String(req.socket.remoteAddress || "unknown");
+  const now = Date.now();
+  let bucket = pinAttempts.get(key);
+  if (bucket && bucket.resetAt <= now) { pinAttempts.delete(key); bucket = null; }
+  if (bucket && bucket.count >= 10) return { ok: false, limited: true };
+  if (safeEqual(candidate || "", config.pin)) {
+    pinAttempts.delete(key);
+    return { ok: true, limited: false };
+  }
+  if (!bucket) bucket = { count: 0, resetAt: now + 5 * 60 * 1000 };
+  bucket.count += 1;
+  pinAttempts.set(key, bucket);
+  return { ok: false, limited: bucket.count >= 10 };
+}
 function requirePin(req, res) {
-  if (pinOk(req)) return true;
-  json(res, 401, { ok: false, error: "PIN incorreto. Confira o PIN no terminal do PC." });
+  const verdict = verifyPin(req, req.headers["x-bridge-pin"] || "");
+  if (verdict.ok) return true;
+  json(res, verdict.limited ? 429 : 401, {
+    ok: false,
+    error: verdict.limited ? "Muitas tentativas de PIN. Aguarde cinco minutos." : "PIN incorreto. Confira o PIN no terminal do PC."
+  });
   return false;
 }
 function requireSession(req, res) {
@@ -476,7 +495,8 @@ async function route(req, res) {
   if (url.pathname === "/api/pair" && req.method === "POST") {
     try {
       const body = await parseBody(req);
-      if (!safeEqual(body.pin || "", config.pin)) return json(res, 401, { ok: false, error: "PIN incorreto." });
+      const verdict = verifyPin(req, body.pin || "");
+      if (!verdict.ok) return json(res, verdict.limited ? 429 : 401, { ok: false, error: verdict.limited ? "Muitas tentativas de PIN. Aguarde cinco minutos." : "PIN incorreto." });
       const token = crypto.randomBytes(32).toString("hex");
       sessions.set(token, { expires: Date.now() + 30 * 24 * 60 * 60 * 1000 });
       return json(res, 200, { ok: true, token, expiresIn: 2592000, ...publicConfig() });
