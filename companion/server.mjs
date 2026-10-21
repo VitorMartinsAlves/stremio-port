@@ -485,6 +485,10 @@ function normalizeLibraryItem(item) {
   const type = item.type || meta.type;
   const name = item.name || meta.name || item.title || meta.title;
   if (!id || !name || !["movie", "series"].includes(String(type).toLowerCase())) return null;
+  const state = item.state && typeof item.state === "object" ? item.state : {};
+  const watched = Number(state.timeWatched || state.timeOffset || state.time_watched || 0);
+  const duration = Number(state.duration || 0);
+  const progress = duration > 0 ? Math.max(0, Math.min(1, watched / duration)) : 0;
   return {
     id: String(id),
     type: String(type).toLowerCase(),
@@ -494,7 +498,8 @@ function normalizeLibraryItem(item) {
     background: item.background || meta.background || "",
     year: item.year || meta.year || "",
     genres: item.genres || meta.genres || [],
-    state: item.state || {},
+    state,
+    progress,
     removed: false
   };
 }
@@ -768,7 +773,13 @@ async function route(req, res) {
         const authKey = await requireStremioAuth();
         const libraryResponse = await stremioApiRequest("datastoreGet", { authKey, collection: "libraryItem", ids: [], all: true });
         const source = Array.isArray(libraryResponse) ? libraryResponse : (Array.isArray(libraryResponse.items) ? libraryResponse.items : []);
-        const items = source.map(normalizeLibraryItem).filter(Boolean);
+        let items = source.map(normalizeLibraryItem).filter(Boolean);
+        if (url.searchParams.get("mode") === "continue") {
+          items = items.filter(item => item.progress > 0.01 && item.progress < 0.7);
+          items.sort((a, b) => b.progress - a.progress);
+        } else {
+          items.sort((a, b) => String(b.name).localeCompare(String(a.name)));
+        }
         return json(res, 200, { ok: true, items, account: publicConfig().account });
       }
       if (url.pathname === "/api/account/logout" && req.method === "POST") {
