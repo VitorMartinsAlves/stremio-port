@@ -21,7 +21,7 @@ The app does not collect Stremio account credentials and does not automatically 
 ## Install via sideload
 
 1. On the Roku, open **Settings → System → Advanced system settings → Developer mode** (wording may differ by Roku OS), enable the installer, and note the device IP address.
-2. Download `stremio-roku-sideload.zip` from the latest successful **Build sideload ZIP** GitHub Actions run, or create it locally with `./scripts/package.sh`.
+2. Download `stremio-roku-sideload.zip` from the latest successful **Build sideload ZIP** GitHub Actions run, or create it locally with `sh ./scripts/package.sh`.
 3. On a computer on the same network, open `http://ROKU-IP` and sign in to the Development Application Installer (`rokudev` and the password you configured on the Roku).
 4. Upload `stremio-roku-sideload.zip`.
 5. On the Roku app, press `*` to open the menu. Choose **Add Add-on** and enter the full add-on manifest URL. Then return to a title and select it to query playable streams.
@@ -29,7 +29,7 @@ The app does not collect Stremio account credentials and does not automatically 
 ## Build locally
 
 ```sh
-./scripts/package.sh
+sh ./scripts/package.sh
 ```
 
 This creates `dist/stremio-roku-sideload.zip`. The ZIP contains the Roku app root files (`manifest`, `source/`, `components/`, and `images/`) and is intended for the Roku Development Application Installer.
