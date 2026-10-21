@@ -279,7 +279,7 @@ sub openStreamPicker()
     if maxCount > 5 then maxCount = 5
     for i = 0 to maxCount - 1
         stream = m.availableStreams[i]
-        name = "Stream " + (i + 1).ToStr()
+        name = "Stream " + Trim(Str(i + 1))
         if stream.name <> invalid then
             name = stream.name
         else if stream.title <> invalid then
