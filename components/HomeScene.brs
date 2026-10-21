@@ -252,7 +252,7 @@ sub onKeyboardSelected()
     dialog = m.top.dialog
     if dialog = invalid then return
     selected = dialog.buttonSelected
-    value = Trim(dialog.text)
+    value = stripOuterSpaces(dialog.text)
     purpose = m.dialogPurpose
     m.top.dialog = invalid
     if selected <> 0 or value = "" then return
@@ -279,7 +279,7 @@ sub openStreamPicker()
     if maxCount > 5 then maxCount = 5
     for i = 0 to maxCount - 1
         stream = m.availableStreams[i]
-        name = "Stream " + Trim(Str(i + 1))
+        name = "Stream " + Mid(Str(i + 1), 2)
         if stream.name <> invalid then
             name = stream.name
         else if stream.title <> invalid then
@@ -374,3 +374,18 @@ sub addAddon(url as String)
     section.Write("addonUrls", FormatJson(m.addons))
     section.Flush()
 end sub
+
+function stripOuterSpaces(value as String) as String
+    first = 1
+    last = Len(value)
+    while first <= last
+        if Mid(value, first, 1) <> " " then exit while
+        first = first + 1
+    end while
+    while last >= first
+        if Mid(value, last, 1) <> " " then exit while
+        last = last - 1
+    end while
+    if last < first then return ""
+    return Mid(value, first, last - first + 1)
+end function
