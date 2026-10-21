@@ -90,7 +90,7 @@ function getJson(url as String) as Dynamic
 end function
 
 function normalizeManifestUrl(rawUrl as String) as String
-    url = Trim(rawUrl)
+    url = trimInputSpaces(rawUrl)
     if Len(url) = 0 then return ""
 
     query = ""
@@ -122,4 +122,19 @@ function makeResourceUrl(manifestUrl as String, resource as String, mediaType as
     end if
 
     return url + "/" + resource + "/" + mediaType + "/" + mediaId + ".json" + query
+end function
+
+function trimInputSpaces(value as String) as String
+    first = 1
+    last = Len(value)
+    while first <= last
+        if Mid(value, first, 1) <> " " then exit while
+        first = first + 1
+    end while
+    while last >= first
+        if Mid(value, last, 1) <> " " then exit while
+        last = last - 1
+    end while
+    if last < first then return ""
+    return Mid(value, first, last - first + 1)
 end function
