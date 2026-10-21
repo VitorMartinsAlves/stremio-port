@@ -13,6 +13,11 @@ sub executeTask()
         base = Left(base, Len(base) - 1)
     end while
 
+    if action = "probe" then
+        m.top.result = requestJson(base + "/api/setup/status", "", "GET", invalid)
+        return
+    end if
+
     if action = "pair" then
         m.top.result = requestJson(base + "/api/pair", "", "POST", { pin: m.top.pin })
         return
@@ -49,12 +54,31 @@ sub executeTask()
         path = "/api/playback?id=" + urlEscape(m.top.mediaId)
     else if action = "serverStatus" then
         path = "/api/server/status"
+    else if action = "accountStatus" then
+        path = "/api/account/status"
+    else if action = "accountLibrary" then
+        path = "/api/account/library"
+        if Len(m.top.mediaType) > 0 then path = path + "?mode=" + urlEscape(m.top.mediaType)
+    else if action = "accountLinkStart" then
+        path = "/api/account/link/start"
+    else if action = "accountLinkCheck" then
+        path = "/api/account/link/check"
+    else if action = "accountSync" then
+        path = "/api/account/sync"
+    else if action = "accountLogout" then
+        path = "/api/account/logout"
     else
         m.top.result = { ok: false, error: "Ação não reconhecida." }
         return
     end if
 
-    m.top.result = requestJson(base + path, token, "GET", invalid)
+    if action = "accountLinkStart" or action = "accountSync" or action = "accountLogout" then
+        m.top.result = requestJson(base + path, token, "POST", {})
+    else if action = "accountLinkCheck" then
+        m.top.result = requestJson(base + path, token, "POST", { code: m.top.mediaId })
+    else
+        m.top.result = requestJson(base + path, token, "GET", invalid)
+    end if
 end sub
 
 function requestJson(url as String, token as String, method as String, payload as Dynamic) as Object
