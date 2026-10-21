@@ -521,6 +521,29 @@ async function route(req, res) {
         return json(res, 200, { ok: true, connected: false, streamingServerUrl: config.streamingServerUrl, error: errText(e), addonCount: config.addons.length });
       }
     }
+    if (url.pathname === "/api/admin/server/settings" && req.method === "GET") {
+      try {
+        const response = await serverJson("settings", { timeout: 5000 });
+        const settings = response.settings && typeof response.settings === "object" ? response.settings : response;
+        return json(res, 200, { ok: true, settings });
+      } catch (e) {
+        return json(res, 502, { ok: false, error: "Não foi possível ler as configurações do Streaming Server: " + errText(e) });
+      }
+    }
+    if (url.pathname === "/api/admin/server/settings" && req.method === "PUT") {
+      try {
+        const body = await parseBody(req);
+        if (!body.settings || typeof body.settings !== "object" || Array.isArray(body.settings)) throw new Error("Envie um objeto JSON de configurações.");
+        const settings = body.settings;
+        const response = await serverFetch("settings", { method: "POST", body: settings, timeout: 8000 });
+        if (!response.ok) throw new Error("O servidor recusou as configurações (HTTP " + response.status + ").");
+        if (Number.isInteger(Number(settings.cacheSize)) && Number(settings.cacheSize) >= 0) {
+          config.cacheSize = Number(settings.cacheSize);
+          saveConfig();
+        }
+        return json(res, 200, { ok: true, settings });
+      } catch (e) { return json(res, 400, { ok: false, error: errText(e) }); }
+    }
     if (url.pathname === "/api/admin/test-addon" && req.method === "POST") {
       try {
         const body = await parseBody(req);
