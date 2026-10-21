@@ -1,0 +1,14 @@
+{
+  "name": "stremio-roku-companion",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Companion on the LAN for the Stremio Roku port",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
