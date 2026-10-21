@@ -161,7 +161,7 @@ sub onTaskStateChanged()
     else if action = "serverStatus" then
         if result.connected = true then
             m.status.text = "Stremio Streaming Server conectado."
-            showMessage("Streaming Server", "Conectado: " + m.bridgeUrl + Chr(10) + "Streaming Server: " + result.streamingServerUrl + Chr(10) + "Add-ons configurados: " + result.addonCount.ToStr() + Chr(10) + "Transcodificação HLS, quando FFmpeg está disponível, é iniciada pelo PC.")
+            showMessage("Streaming Server", "Conectado: " + m.bridgeUrl + Chr(10) + "Streaming Server: " + result.streamingServerUrl + Chr(10) + "Add-ons configurados: " + Mid(Str(result.addonCount), 2) + Chr(10) + "Transcodificação HLS, quando FFmpeg está disponível, é iniciada pelo PC.")
         else
             m.status.text = "Stremio Streaming Server não encontrado."
             errorText = "Abra o Stremio Desktop/Service no PC e confira a URL configurada no painel."
@@ -271,7 +271,7 @@ sub openMenu()
     dialog = CreateObject("roSGNode", "Dialog")
     dialog.title = "Stremio for Roku"
     dialog.message = "Escolha uma ação"
-    dialog.buttons = ["Buscar", "Filmes", "Séries", "Conectar ao PC", "Estado do servidor", "Painel de add-ons"]
+    dialog.buttons = ["Buscar", "Filmes", "Séries", "Mais opções"]
     dialog.observeField("buttonSelected", "onMenuSelected")
     m.top.dialog = dialog
 end sub
@@ -288,11 +288,30 @@ sub onMenuSelected()
     else if selected = 2 then
         loadCatalog("series", "")
     else if selected = 3 then
+        openMoreMenu()
+    end if
+end sub
+
+sub openMoreMenu()
+    dialog = CreateObject("roSGNode", "Dialog")
+    dialog.title = "Stremio for Roku"
+    dialog.message = "Mais opções"
+    dialog.buttons = ["Conectar ao PC", "Estado do servidor", "Painel de add-ons", "Voltar"]
+    dialog.observeField("buttonSelected", "onMoreMenuSelected")
+    m.top.dialog = dialog
+end sub
+
+sub onMoreMenuSelected()
+    dialog = m.top.dialog
+    if dialog = invalid then return
+    selected = dialog.buttonSelected
+    m.top.dialog = invalid
+    if selected = 0 then
         openKeyboard("Conectar ao PC", "Digite o endereço do companion, incluindo a porta. Ex.: http://192.168.15.10:17890", "bridgeUrl")
-    else if selected = 4 then
+    else if selected = 1 then
         task = createTask("serverStatus")
         if task <> invalid then runTask(task)
-    else if selected = 5 then
+    else if selected = 2 then
         if Len(m.bridgeUrl) > 0 then
             showMessage("Painel do companion", "Abra no navegador do PC: " + m.bridgeUrl + "/")
         else
@@ -347,7 +366,7 @@ sub openStreamPicker()
     end if
     buttons = []
     maxCount = m.availableStreams.Count()
-    if maxCount > 4 then maxCount = 4
+    if maxCount > 3 then maxCount = 3
     for i = 0 to maxCount - 1
         stream = m.availableStreams[i]
         name = "Fonte " + Mid(Str(i + 1), 2)
@@ -369,7 +388,7 @@ sub onStreamSelected()
     if dialog = invalid then return
     selected = dialog.buttonSelected
     m.top.dialog = invalid
-    if selected >= 0 and selected < m.availableStreams.Count() and selected < 4 then startPlayback(m.availableStreams[selected])
+    if selected >= 0 and selected < m.availableStreams.Count() and selected < 3 then startPlayback(m.availableStreams[selected])
 end sub
 
 sub startPlayback(stream as Object)
