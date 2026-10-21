@@ -217,8 +217,8 @@ async function startTranscode(id, entry, req) {
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
     "-vf", "scale=w='min(1280,iw)':h=-2",
     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-    "-f", "hls", "-hls_time", "6", "-hls_list_size", "10",
-    "-hls_flags", "delete_segments+append_list+omit_endlist",
+    "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
+    "-hls_flags", "independent_segments+temp_file",
     "-hls_segment_filename", segment, playlist
   ];
   const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", args, {
@@ -495,7 +495,14 @@ async function route(req, res) {
           config.addons = [...new Set(body.addons.map(item => normalizeManifestUrl(String(item)).href))];
         }
         saveConfig();
-        return json(res, 200, { ok: true, config: publicConfig() });
+        let streamingSettingsUpdated = false;
+        try {
+          const current = await serverJson("settings", { timeout: 2500 });
+          const existing = current.settings && typeof current.settings === "object" ? current.settings : current;
+          await serverJson("settings", { method: "POST", body: { ...existing, cacheSize: config.cacheSize }, timeout: 3000 });
+          streamingSettingsUpdated = true;
+        } catch {}
+        return json(res, 200, { ok: true, config: publicConfig(), streamingSettingsUpdated });
       } catch (e) { return json(res, e.statusCode || 400, { ok: false, error: errText(e) }); }
     }
     if (url.pathname === "/api/admin/server/status" && req.method === "GET") {
@@ -633,6 +640,19 @@ async function route(req, res) {
   }
   return json(res, 404, { ok: false, error: "Não encontrado." });
 }
+
+const cleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of mediaEntries) if (entry.expires < now) mediaEntries.delete(id);
+  for (const [id, entry] of playbackEntries) if (entry.expires < now) playbackEntries.delete(id);
+  for (const [id, session] of transcodeSessions) {
+    if (session.expires >= now) continue;
+    if (session.child && session.child.exitCode === null) session.child.kill("SIGTERM");
+    transcodeSessions.delete(id);
+    try { fs.rmSync(session.dir, { recursive: true, force: true }); } catch {}
+  }
+}, 10 * 60 * 1000);
+cleanupTimer.unref();
 
 const server = http.createServer((req, res) => {
   route(req, res).catch(e => {
