@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="HomeScene" extends="Scene">
+    <script type="text/brightscript" uri="pkg:/components/HomeScene.brs" />
+    <children>
+        <Rectangle id="background" width="1280" height="720" color="#101014" />
+        <Label id="title" translation="[60,28]" width="1160" height="46" text="Stremio for Roku" color="#FFFFFF" font="font:LargeBoldSystemFont" />
+        <Label id="status" translation="[62,84]" width="1140" height="38" text="Loading catalog…" color="#B9B9C4" font="font:MediumSystemFont" />
+        <PosterGrid id="grid" translation="[60,142]" width="1160" height="500" basePosterSize="[174,240]" itemSpacing="[20,18]" numColumns="5" numRows="2" />
+        <Label id="footer" translation="[62,665]" width="1160" height="28" text="Press * for Search, Add Add-on, Movies, or Series." color="#8C8C98" font="font:SmallSystemFont" />
+        <Video id="video" width="1280" height="720" visible="false" />
+    </children>
+</component>
