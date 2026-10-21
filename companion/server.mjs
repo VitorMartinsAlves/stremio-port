@@ -225,16 +225,22 @@ async function startTranscode(id, entry, req) {
     stdio: ["ignore", "ignore", "pipe"], windowsHide: true
   });
   let stderr = "";
+  let spawnError = "";
   child.stderr.on("data", chunk => { stderr = (stderr + chunk.toString()).slice(-3000); });
+  child.on("error", e => { spawnError = errText(e); });
   const session = { child, dir, expires: Date.now() + MEDIA_TTL, stderr: () => stderr };
   transcodeSessions.set(id, session);
-  child.once("exit", () => { session.expires = Date.now() + 10 * 60 * 1000; });
+  child.once("exit", () => { session.expires = Date.now() + 4 * 60 * 60 * 1000; });
   const started = Date.now();
   while (Date.now() - started < 25000) {
     if (fs.existsSync(playlist) && fs.readdirSync(dir).some(name => name.endsWith(".ts"))) return session;
+    if (spawnError) throw new Error("Não foi possível iniciar o FFmpeg: " + spawnError);
     if (child.exitCode !== null) throw new Error("FFmpeg terminou sem gerar HLS: " + (stderr || "verifique os codecs e a fonte."));
     await new Promise(resolve => setTimeout(resolve, 400));
   }
+  child.kill("SIGTERM");
+  transcodeSessions.delete(id);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   throw new Error("FFmpeg não conseguiu iniciar a transcodificação em 25 s: " + (stderr || "a fonte ainda pode estar carregando."));
 }
 function signedMediaPath(id, rawUrl) {
@@ -608,6 +614,7 @@ async function route(req, res) {
     const id = transcodeMatch[1], filename = transcodeMatch[2];
     const session = transcodeSessions.get(id);
     if (!session || session.expires < Date.now()) return json(res, 410, { ok: false, error: "Transcodificação expirada." });
+    session.expires = Date.now() + 4 * 60 * 60 * 1000;
     const filePath = path.join(session.dir, filename);
     if (!fs.existsSync(filePath)) return json(res, 404, { ok: false, error: "Segmento ainda não foi gerado." });
     const stat = fs.statSync(filePath);
