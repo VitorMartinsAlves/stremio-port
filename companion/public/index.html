@@ -46,6 +46,7 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 28px}
 <div><label for="cacheSize">Tamanho do cache</label><select id="cacheSize"><option value="0">Desativado</option><option value="1073741824">1 GiB</option><option value="2147483648">2 GiB</option><option value="4294967296">4 GiB</option><option value="8589934592">8 GiB</option><option value="17179869184">16 GiB</option></select></div>
 <div><label for="bridgePort">Porta do companion</label><input id="bridgePort" value="17890" disabled></div>
 </div>
+<label style="display:flex;gap:10px;align-items:center"><input id="transcodeTorrents" type="checkbox" style="width:auto"> Transcodificar torrents para HLS compatível com Roku (requer FFmpeg)</label>
 <div class="actions"><button id="saveBtn">Salvar configurações</button><button id="testServerBtn" class="secondary">Testar servidor</button></div>
 </section>
 <section class="card">
@@ -98,6 +99,7 @@ async function loadConfig(){
     $("streamingServerUrl").value=c.streamingServerUrl||"http://127.0.0.1:11470";
     $("publicBaseUrl").value=c.publicBaseUrl||"";
     $("cacheSize").value=String(c.cacheSize||0);
+    $("transcodeTorrents").checked=c.transcodeTorrents!==false;
     addons=Array.isArray(c.addons)?c.addons:[];
     renderAddons();
   }catch(e){$("serverStatus").textContent="Informe o PIN para carregar a configuração";$("serverDot").className="dot bad";}
@@ -118,6 +120,7 @@ $("saveBtn").onclick=async()=>{
       streamingServerUrl:$("streamingServerUrl").value.trim(),
       publicBaseUrl:$("publicBaseUrl").value.trim(),
       cacheSize:Number($("cacheSize").value),
+      transcodeTorrents:$("transcodeTorrents").checked,
       addons
     })});
     message("Configurações salvas.",true);await testServer();
@@ -128,7 +131,7 @@ $("saveAddonsBtn").onclick=async()=>{
     await request("/api/admin/config",{method:"PUT",headers:pinHeaders(),body:JSON.stringify({
       streamingServerUrl:$("streamingServerUrl").value.trim(),
       publicBaseUrl:$("publicBaseUrl").value.trim(),
-      cacheSize:Number($("cacheSize").value),addons
+      cacheSize:Number($("cacheSize").value),transcodeTorrents:$("transcodeTorrents").checked,addons
     })});
     message("Lista de add-ons salva.",true);
   }catch(e){message(e.message,false);}
