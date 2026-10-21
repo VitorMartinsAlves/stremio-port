@@ -240,7 +240,11 @@ sub onTaskStateChanged()
         message = "A solicitação falhou."
         if result.error <> invalid then message = result.error
         m.status.text = message
-        if action = "playback" or action = "serverStatus" then showMessage("Stremio for Roku", message)
+        if action = "accountLibrary" then
+            showMessage("Minha biblioteca", message + Chr(10) + "Vincule sua conta em * → Mais opções → Conta Stremio.")
+        else if action = "playback" or action = "serverStatus" then
+            showMessage("Stremio para Roku", message)
+        end if
         return
     end if
 
