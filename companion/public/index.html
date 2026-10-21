@@ -67,6 +67,12 @@ footer{text-align:center;color:var(--muted);font-size:12px;padding:0 20px 28px}
 <h2>Diagnóstico</h2><p class="sub">Estado do streaming server, número de add-ons e versão deste bridge.</p>
 <div id="diagnostics" class="sub">Clique em “Testar servidor” para ver o diagnóstico.</div>
 </section>
+<section class="card">
+<h2>Configurações avançadas do Streaming Server</h2>
+<p class="sub">Lê e edita o JSON que o servidor local realmente disponibiliza, para configurações que variam entre versões. Faça uma cópia antes de alterar. O servidor pode rejeitar campos desconhecidos ou exigir autorização interna.</p>
+<textarea id="settingsJson" rows="12" spellcheck="false" placeholder='Clique em "Ler configurações do servidor".'></textarea>
+<div class="actions"><button id="readSettingsBtn" class="secondary">Ler configurações do servidor</button><button id="writeSettingsBtn">Aplicar JSON ao servidor</button></div>
+</section>
 </main>
 <footer>Stremio Roku Bridge · Código aberto · Não inclua links de streaming de fontes que você não confia.</footer>
 <script>
@@ -145,6 +151,23 @@ $("testAddonBtn").onclick=async()=>{
   }catch(e){$("addonPreview").textContent="";message(e.message,false);}
 };
 $("testServerBtn").onclick=testServer;
+$("readSettingsBtn").onclick=async()=>{
+  try{
+    const data=await request("/api/admin/server/settings",{headers:pinHeaders()});
+    $("settingsJson").value=JSON.stringify(data.settings,null,2);
+    message("Configurações lidas do Streaming Server.",true);
+  }catch(e){message(e.message,false);}
+};
+$("writeSettingsBtn").onclick=async()=>{
+  try{
+    const settings=JSON.parse($("settingsJson").value);
+    if(!settings||typeof settings!=="object"||Array.isArray(settings)) throw new Error("O JSON precisa ser um objeto.");
+    const data=await request("/api/admin/server/settings",{method:"PUT",headers:pinHeaders(),body:JSON.stringify({settings})});
+    $("settingsJson").value=JSON.stringify(data.settings,null,2);
+    message("Configurações enviadas ao Streaming Server.",true);
+    await testServer();
+  }catch(e){message(e.message,false);}
+};
 $("showPinBtn").onclick=()=>{$("pin").type=$("pin").type==="password"?"text":"password";$("pin").focus();};
 $("copyUrlBtn").onclick=async()=>{try{await navigator.clipboard.writeText($("connectUrl").textContent);message("Endereço copiado.",true);}catch{message("Copie manualmente o endereço exibido.",false);}};
 $("pin").value=localStorage.getItem("stremioBridgePin")||"";
