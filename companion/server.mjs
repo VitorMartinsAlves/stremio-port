@@ -1,0 +1,532 @@
+#!/usr/bin/env node
+import http from "node:http";
+import https from "node:https";
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = process.env.STREMIO_BRIDGE_DATA || path.join(HERE, "data");
+const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const HOST = process.env.STREMIO_BRIDGE_HOST || "0.0.0.0";
+const PORT = Number(process.env.STREMIO_BRIDGE_PORT || 17890);
+const VERSION = "0.3.0";
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function cleanBase(value) {
+  const u = new URL(String(value));
+  if (!["http:", "https:"].includes(u.protocol) || u.username || u.password) throw new Error("Use uma URL HTTP/HTTPS sem credenciais embutidas.");
+  u.hash = "";
+  return u.href.replace(/\/+$/, "");
+}
+function randomPin() { return String(crypto.randomInt(100000, 1000000)); }
+function loadConfig() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    return {
+      pin: String(raw.pin || randomPin()),
+      secret: String(raw.secret || crypto.randomBytes(32).toString("hex")),
+      streamingServerUrl: cleanBase(raw.streamingServerUrl || process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
+      publicBaseUrl: String(raw.publicBaseUrl || "").replace(/\/+$/, ""),
+      addons: Array.isArray(raw.addons) ? raw.addons.filter(x => typeof x === "string") : [],
+      cacheSize: Number.isFinite(Number(raw.cacheSize)) ? Number(raw.cacheSize) : 2147483648
+    };
+  } catch {
+    return {
+      pin: process.env.STREMIO_BRIDGE_PIN || randomPin(),
+      secret: crypto.randomBytes(32).toString("hex"),
+      streamingServerUrl: cleanBase(process.env.STREMIO_STREAM_SERVER || "http://127.0.0.1:11470"),
+      publicBaseUrl: "",
+      addons: [],
+      cacheSize: 2147483648
+    };
+  }
+}
+let config = loadConfig();
+function saveConfig() { fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 }); }
+saveConfig();
+
+const sessions = new Map();
+const mediaEntries = new Map();
+const MAX_MEDIA_ENTRIES = 1500;
+const MEDIA_TTL = 45 * 60 * 1000;
+
+function json(res, code, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(code, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS,HEAD",
+    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Bridge-Pin,Range"
+  });
+  res.end(body);
+}
+function html(res, code, body) {
+  res.writeHead(code, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+  res.end(body);
+}
+function noContent(res) {
+  res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS,HEAD", "Access-Control-Allow-Headers": "Content-Type,Authorization,X-Bridge-Pin,Range" });
+  res.end();
+}
+function parseBody(req, limit = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", chunk => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(Object.assign(new Error("Request body too large"), { statusCode: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!chunks.length) return resolve({});
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+      catch { reject(Object.assign(new Error("JSON inválido."), { statusCode: 400 })); }
+    });
+    req.on("error", reject);
+  });
+}
+function safeEqual(a, b) {
+  const aa = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
+}
+function pinOk(req) { return safeEqual(req.headers["x-bridge-pin"] || "", config.pin); }
+function requirePin(req, res) {
+  if (pinOk(req)) return true;
+  json(res, 401, { ok: false, error: "PIN incorreto. Confira o PIN no terminal do PC." });
+  return false;
+}
+function requireSession(req, res) {
+  const auth = String(req.headers.authorization || "");
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const session = sessions.get(token);
+  if (!session || session.expires < Date.now()) {
+    sessions.delete(token);
+    json(res, 401, { ok: false, error: "Pareamento expirado. No Roku, abra Opções > Conectar ao PC e informe o PIN novamente." });
+    return false;
+  }
+  return true;
+}
+function publicConfig() {
+  return { streamingServerUrl: config.streamingServerUrl, publicBaseUrl: config.publicBaseUrl, addons: config.addons, cacheSize: config.cacheSize, port: PORT, version: VERSION };
+}
+function baseFromRequest(req) {
+  if (config.publicBaseUrl) return config.publicBaseUrl;
+  return "http://" + String(req.headers.host || ("127.0.0.1:" + PORT));
+}
+function safeHttpUrl(raw) {
+  const u = new URL(raw);
+  if (!["http:", "https:"].includes(u.protocol) || u.username || u.password) throw new Error("URL HTTP/HTTPS inválida.");
+  return u;
+}
+function normalizeManifestUrl(raw) {
+  const u = safeHttpUrl(String(raw).trim());
+  if (!/\/manifest\.json$/i.test(u.pathname)) u.pathname = u.pathname.replace(/\/+$/, "") + "/manifest.json";
+  u.hash = "";
+  return u;
+}
+function addonResourceUrl(manifestRaw, resourcePath) {
+  const manifest = normalizeManifestUrl(manifestRaw);
+  const prefix = manifest.pathname.replace(/\/manifest\.json$/i, "").replace(/\/+$/, "");
+  const u = new URL(manifest.origin + prefix + "/" + resourcePath);
+  u.search = manifest.search;
+  return u;
+}
+async function getJson(rawUrl, options = {}) {
+  const u = safeHttpUrl(rawUrl);
+  const response = await fetch(u, {
+    method: options.method || "GET",
+    headers: { "user-agent": "Stremio-Roku-Bridge/" + VERSION, ...(options.headers || {}) },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    signal: AbortSignal.timeout(options.timeout || 12000),
+    redirect: "follow"
+  });
+  const txt = await response.text();
+  if (!response.ok) throw new Error(String(response.status) + " " + response.statusText + " em " + u.host + u.pathname);
+  try { return txt ? JSON.parse(txt) : {}; } catch { throw new Error("O endpoint não retornou JSON válido."); }
+}
+function errText(error) { return String(error?.message || error || "Erro desconhecido").slice(0, 400); }
+function listAddons() {
+  return config.addons.map(raw => {
+    try { return normalizeManifestUrl(raw).href; } catch { return null; }
+  }).filter(Boolean);
+}
+function addMediaEntry(url, headers = {}) {
+  const id = crypto.randomBytes(18).toString("base64url");
+  mediaEntries.set(id, { url: String(url), headers, expires: Date.now() + MEDIA_TTL });
+  if (mediaEntries.size > MAX_MEDIA_ENTRIES) {
+    for (const [key, item] of mediaEntries) if (item.expires < Date.now()) mediaEntries.delete(key);
+    while (mediaEntries.size > MAX_MEDIA_ENTRIES) mediaEntries.delete(mediaEntries.keys().next().value);
+  }
+  return id;
+}
+function signedMediaPath(id, rawUrl) {
+  const target = safeHttpUrl(rawUrl).href;
+  const signature = crypto.createHmac("sha256", config.secret).update(id + "\n" + target).digest("hex");
+  return "/media/" + id + "/" + signature + "/" + Buffer.from(target).toString("base64url");
+}
+function mediaUrl(req, id, rawUrl) { return baseFromRequest(req) + signedMediaPath(id, rawUrl); }
+function normalType(value) { return ["movie", "series"].includes(String(value).toLowerCase()) ? String(value).toLowerCase() : "movie"; }
+
+async function getCatalog(type, search) {
+  type = normalType(type);
+  const searchPart = search ? "/search=" + encodeURIComponent(search) : "";
+  const main = await getJson("https://v3-cinemeta.strem.io/catalog/" + type + "/top" + searchPart + ".json");
+  const metas = Array.isArray(main.metas) ? main.metas : [];
+  const extraResults = [];
+  for (const addonUrl of listAddons()) {
+    try {
+      const manifest = await getJson(normalizeManifestUrl(addonUrl).href, { timeout: 7000 });
+      for (const catalog of (manifest.catalogs || [])) {
+        if (!catalog || catalog.type !== type || !catalog.id) continue;
+        const extras = Array.isArray(catalog.extra) ? catalog.extra : [];
+        if (search && !extras.some(x => x.name === "search")) continue;
+        const resource = "catalog/" + type + "/" + encodeURIComponent(catalog.id) + searchPart + ".json";
+        const result = await getJson(addonResourceUrl(addonUrl, resource).href, { timeout: 7000 });
+        for (const meta of (result.metas || [])) extraResults.push(meta);
+        if (extraResults.length >= 100) break;
+      }
+    } catch { /* An optional add-on must not break the full catalog. */ }
+    if (extraResults.length >= 100) break;
+  }
+  const seen = new Set();
+  return [...metas, ...extraResults].filter(meta => {
+    const key = String(meta.type || type) + ":" + String(meta.id || meta.name || "");
+    if (!meta.id && !meta.name || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 100);
+}
+async function getMeta(type, id) {
+  const response = await getJson("https://v3-cinemeta.strem.io/meta/" + normalType(type) + "/" + encodeURIComponent(id) + ".json");
+  if (response.meta) return response.meta;
+  if (response.id) return response;
+  throw new Error("Não foi possível carregar os detalhes deste título.");
+}
+function streamHeaders(stream) {
+  const request = stream.behaviorHints?.proxyHeaders?.request || stream.behaviorHints?.headers || {};
+  const headers = {};
+  for (const [name, value] of Object.entries(request)) {
+    if (typeof value === "string" && !["host", "content-length", "connection"].includes(name.toLowerCase())) headers[name] = value;
+  }
+  return headers;
+}
+async function serverFetch(pathname, init = {}) {
+  const endpoint = config.streamingServerUrl + "/" + pathname.replace(/^\/+/, "");
+  return await fetch(endpoint, {
+    method: init.method || "GET",
+    headers: { "user-agent": "Stremio-Roku-Bridge/" + VERSION, ...(init.headers || {}) },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(init.timeout || 10000),
+    redirect: "manual"
+  });
+}
+async function serverJson(pathname, init = {}) {
+  const response = await serverFetch(pathname, init);
+  if (response.status < 200 || response.status >= 300) {
+    const body = await response.text().catch(() => "");
+    throw new Error("Stremio Streaming Server retornou " + response.status + (body ? ": " + body.slice(0, 150) : ""));
+  }
+  return await response.json().catch(() => ({}));
+}
+async function createTorrentStream(stream, req) {
+  const hash = String(stream.infoHash || "").toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(hash)) throw new Error("infoHash do torrent inválido.");
+  const sources = Array.isArray(stream.sources) ? stream.sources : [];
+  const announce = sources.map(s => String(s).replace(/^tracker:/i, "")).filter(s => /^https?:\/\/|^udp:\/\//i.test(s));
+  const body = { announce };
+  if (Array.isArray(stream.fileMustInclude) && stream.fileMustInclude.length) body.fileMustInclude = stream.fileMustInclude;
+  if (stream.fileIdx !== undefined && Number.isInteger(Number(stream.fileIdx))) body.guessFileIdx = String(stream.fileIdx);
+  else if (stream.behaviorHints?.filename) body.guessFileIdx = String(stream.behaviorHints.filename);
+  await serverJson(hash + "/create", { method: "POST", body, timeout: 20000 });
+  const idx = Number.isInteger(Number(stream.fileIdx)) && Number(stream.fileIdx) >= 0 ? Number(stream.fileIdx) : -1;
+  return {
+    url: baseFromRequest(req) + "/media/torrent/" + hash + "/" + idx,
+    name: stream.name || stream.title || "Torrent",
+    description: stream.description || "",
+    sourceType: "torrent",
+    infoHash: hash,
+    fileIdx: idx
+  };
+}
+async function getStreams(type, videoId, req) {
+  type = normalType(type);
+  const candidates = [];
+  for (const addonUrl of listAddons()) {
+    try {
+      const manifest = await getJson(normalizeManifestUrl(addonUrl).href, { timeout: 7000 });
+      if (manifest.resources && !manifest.resources.some(r => (typeof r === "string" ? r : r.name) === "stream")) continue;
+      if (manifest.types && !manifest.types.includes(type)) continue;
+      const resource = "stream/" + type + "/" + encodeURIComponent(videoId) + ".json";
+      const payload = await getJson(addonResourceUrl(addonUrl, resource).href, { timeout: 16000 });
+      for (const stream of payload.streams || []) candidates.push({ ...stream, _addonName: manifest.name || "Add-on" });
+    } catch (e) {
+      candidates.push({ _error: errText(e), _addonName: "Add-on" });
+    }
+  }
+  // Read Stremio's local-file add-on when the local Streaming Server exposes it.
+  try {
+    const payload = await getJson(config.streamingServerUrl + "/local-addon/stream/" + type + "/" + encodeURIComponent(videoId) + ".json", { timeout: 5000 });
+    for (const stream of payload.streams || []) candidates.push({ ...stream, _addonName: "Stremio Local Files" });
+  } catch {}
+
+  const result = [];
+  const seen = new Set();
+  for (const stream of candidates) {
+    if (stream._error) {
+      result.push({ name: "Falha no add-on", description: stream._error, unavailable: true });
+      continue;
+    }
+    try {
+      let item;
+      if (stream.infoHash) {
+        item = await createTorrentStream(stream, req);
+      } else if (typeof stream.url === "string" && /^https?:\/\//i.test(stream.url)) {
+        const headers = streamHeaders(stream);
+        const id = addMediaEntry(stream.url, headers);
+        item = {
+          url: mediaUrl(req, id, stream.url),
+          name: stream.name || stream.title || stream.behaviorHints?.filename || "Stream direto",
+          description: stream.description || "",
+          sourceType: "url"
+        };
+      } else if (stream.ytId) {
+        item = { name: stream.name || "YouTube", description: "Este add-on entrega ytId; a resolução de YouTube ainda depende de um resolvedor compatível.", unavailable: true };
+      } else {
+        continue;
+      }
+      item.addon = stream._addonName || "Add-on";
+      const key = item.url || item.addon + ":" + item.name;
+      if (!seen.has(key)) { seen.add(key); result.push(item); }
+    } catch (e) {
+      result.push({ name: stream.name || stream.title || "Fonte indisponível", description: errText(e), unavailable: true });
+    }
+  }
+  return result.slice(0, 80);
+}
+function pickResponseHeaders(input) {
+  const output = {};
+  for (const key of ["content-type", "content-length", "content-range", "accept-ranges", "cache-control", "last-modified", "etag", "expires", "transfermode.dlna.org", "contentfeatures.dlna.org"]) {
+    if (input[key] !== undefined) output[key] = input[key];
+  }
+  output["Access-Control-Allow-Origin"] = "*";
+  return output;
+}
+function proxyRequest(req, res, rawTarget, extraHeaders = {}, redirects = 0, mediaId = null) {
+  let target;
+  try { target = safeHttpUrl(rawTarget); }
+  catch { return json(res, 400, { ok: false, error: "URL de mídia não suportada." }); }
+  if (redirects > 6) return json(res, 502, { ok: false, error: "Redirecionamentos demais na origem." });
+  const headers = { "User-Agent": "Stremio-Roku-Bridge/" + VERSION, "Accept": req.headers.accept || "*/*", ...extraHeaders };
+  for (const key of ["range", "if-range", "accept-language"]) if (req.headers[key]) headers[key] = req.headers[key];
+  delete headers.host; delete headers.Host;
+  const transport = target.protocol === "https:" ? https : http;
+  const upstream = transport.request(target, { method: req.method, headers, timeout: 30000 }, up => {
+    if ([301, 302, 303, 307, 308].includes(up.statusCode || 0) && up.headers.location) {
+      up.resume();
+      return proxyRequest(req, res, new URL(up.headers.location, target).href, extraHeaders, redirects + 1, mediaId);
+    }
+    const contentType = String(up.headers["content-type"] || "");
+    const isPlaylist = /mpegurl/i.test(contentType) || /\.m3u8(?:$|[?#])/i.test(target.href);
+    if (isPlaylist && req.method !== "HEAD" && (up.statusCode || 500) < 400 && mediaId) {
+      const chunks = [];
+      let total = 0;
+      up.on("data", chunk => {
+        total += chunk.length;
+        if (total > 6 * 1024 * 1024) up.destroy(new Error("Playlist muito grande."));
+        else chunks.push(chunk);
+      });
+      up.on("end", () => {
+        const original = Buffer.concat(chunks).toString("utf8");
+        const rewrite = value => {
+          try { return mediaUrlFromEntry(mediaId, new URL(value, target).href); }
+          catch { return value; }
+        };
+        let bodyText = original.replace(/URI="([^"]+)"/g, (_m, uri) => 'URI="' + rewrite(uri) + '"');
+        bodyText = bodyText.split(/\r?\n/).map(line => {
+          const trimmed = line.trim();
+          return (!trimmed || trimmed.startsWith("#")) ? line : rewrite(trimmed);
+        }).join("\n");
+        const body = Buffer.from(bodyText);
+        const outHeaders = pickResponseHeaders(up.headers);
+        outHeaders["Content-Type"] = contentType || "application/vnd.apple.mpegurl";
+        outHeaders["Content-Length"] = String(body.length);
+        res.writeHead(up.statusCode || 200, outHeaders);
+        res.end(body);
+      });
+      up.on("error", e => { if (!res.headersSent) json(res, 502, { ok:false, error: errText(e) }); else res.destroy(e); });
+      return;
+    }
+    res.writeHead(up.statusCode || 502, pickResponseHeaders(up.headers));
+    if (req.method === "HEAD") { up.resume(); res.end(); return; }
+    up.pipe(res);
+    up.on("error", e => { if (!res.headersSent) json(res, 502, { ok: false, error: errText(e) }); else res.destroy(e); });
+  });
+  upstream.on("timeout", () => upstream.destroy(new Error("Tempo limite da origem excedido.")));
+  upstream.on("error", e => { if (!res.headersSent) json(res, 502, { ok: false, error: "Servidor de mídia indisponível: " + errText(e) }); else res.destroy(e); });
+  upstream.end();
+}
+function mediaUrlFromEntry(id, target) {
+  const entry = mediaEntries.get(id);
+  if (!entry || entry.expires < Date.now()) throw new Error("Sessão de mídia expirada.");
+  return baseGlobalForMedia + signedMediaPath(id, target);
+}
+let baseGlobalForMedia = "http://127.0.0.1:" + PORT;
+function setBaseGlobal(req) { baseGlobalForMedia = baseFromRequest(req); }
+
+async function route(req, res) {
+  if (req.method === "OPTIONS") return noContent(res);
+  let url;
+  try { url = new URL(req.url, "http://" + (req.headers.host || ("127.0.0.1:" + PORT))); }
+  catch { return json(res, 400, { ok: false, error: "URL inválida." }); }
+  setBaseGlobal(req);
+  if (url.pathname === "/" && req.method === "GET") {
+    try { return html(res, 200, fs.readFileSync(path.join(HERE, "public", "index.html"), "utf8")); }
+    catch { return html(res, 500, "Dashboard ausente. Baixe o repositório completo."); }
+  }
+  if (url.pathname === "/api/health" && req.method === "GET") return json(res, 200, { ok: true, version: VERSION, service: "Stremio Roku Bridge" });
+  if (url.pathname === "/api/pair" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      if (!safeEqual(body.pin || "", config.pin)) return json(res, 401, { ok: false, error: "PIN incorreto." });
+      const token = crypto.randomBytes(32).toString("hex");
+      sessions.set(token, { expires: Date.now() + 30 * 24 * 60 * 60 * 1000 });
+      return json(res, 200, { ok: true, token, expiresIn: 2592000, ...publicConfig() });
+    } catch (e) { return json(res, e.statusCode || 400, { ok: false, error: errText(e) }); }
+  }
+  if (url.pathname.startsWith("/api/admin/")) {
+    if (!requirePin(req, res)) return;
+    if (url.pathname === "/api/admin/config" && req.method === "GET") return json(res, 200, { ok: true, config: publicConfig() });
+    if (url.pathname === "/api/admin/config" && req.method === "PUT") {
+      try {
+        const body = await parseBody(req);
+        if (body.streamingServerUrl !== undefined) config.streamingServerUrl = cleanBase(body.streamingServerUrl);
+        if (body.publicBaseUrl !== undefined) config.publicBaseUrl = body.publicBaseUrl ? cleanBase(body.publicBaseUrl) : "";
+        if (body.cacheSize !== undefined) {
+          const n = Number(body.cacheSize);
+          if (!Number.isInteger(n) || n < 0 || n > 17179869184) throw new Error("Cache deve estar entre 0 e 16 GiB.");
+          config.cacheSize = n;
+        }
+        if (Array.isArray(body.addons)) {
+          if (body.addons.length > 100) throw new Error("Máximo de 100 add-ons.");
+          config.addons = [...new Set(body.addons.map(item => normalizeManifestUrl(String(item)).href))];
+        }
+        saveConfig();
+        return json(res, 200, { ok: true, config: publicConfig() });
+      } catch (e) { return json(res, e.statusCode || 400, { ok: false, error: errText(e) }); }
+    }
+    if (url.pathname === "/api/admin/test-addon" && req.method === "POST") {
+      try {
+        const body = await parseBody(req);
+        const manifestUrl = normalizeManifestUrl(body.url).href;
+        const manifest = await getJson(manifestUrl);
+        if (!manifest.id || !manifest.name || !manifest.version) throw new Error("O manifesto precisa conter id, name e version.");
+        return json(res, 200, { ok: true, manifest: { id: manifest.id, name: manifest.name, version: manifest.version, description: manifest.description || "", resources: manifest.resources || [], types: manifest.types || [], catalogs: manifest.catalogs || [] }, manifestUrl });
+      } catch (e) { return json(res, 400, { ok: false, error: errText(e) }); }
+    }
+    return json(res, 404, { ok: false, error: "Endpoint administrativo não encontrado." });
+  }
+  if (url.pathname.startsWith("/api/")) {
+    if (!requireSession(req, res)) return;
+    try {
+      if (url.pathname === "/api/config" && req.method === "GET") return json(res, 200, { ok: true, config: publicConfig() });
+      if (url.pathname === "/api/server/status" && req.method === "GET") {
+        try {
+          const heartbeat = await serverJson("heartbeat", { timeout: 3500 });
+          let settings = {};
+          try { settings = await serverJson("settings", { timeout: 3500 }); } catch {}
+          return json(res, 200, { ok: true, connected: true, streamingServerUrl: config.streamingServerUrl, heartbeat, settings, cacheSize: config.cacheSize, addonCount: config.addons.length });
+        } catch (e) {
+          return json(res, 200, { ok: true, connected: false, streamingServerUrl: config.streamingServerUrl, error: errText(e), addonCount: config.addons.length });
+        }
+      }
+      if (url.pathname === "/api/catalog" && req.method === "GET") {
+        const metas = await getCatalog(url.searchParams.get("type") || "movie", (url.searchParams.get("search") || "").slice(0, 120));
+        return json(res, 200, { ok: true, metas });
+      }
+      if (url.pathname === "/api/meta" && req.method === "GET") {
+        const meta = await getMeta(url.searchParams.get("type") || "movie", url.searchParams.get("id") || "");
+        return json(res, 200, { ok: true, meta });
+      }
+      if (url.pathname === "/api/episodes" && req.method === "GET") {
+        const meta = await getMeta("series", url.searchParams.get("id") || "");
+        return json(res, 200, { ok: true, episodes: meta.videos || [], meta });
+      }
+      if (url.pathname === "/api/streams" && req.method === "GET") {
+        const type = url.searchParams.get("type") || "movie";
+        const videoId = url.searchParams.get("videoId") || "";
+        if (!videoId) return json(res, 400, { ok: false, error: "videoId obrigatório." });
+        const streams = await getStreams(type, videoId, req);
+        return json(res, 200, { ok: true, streams });
+      }
+      if (url.pathname === "/api/server/settings" && req.method === "GET") {
+        try {
+          const settings = await serverJson("settings", { timeout: 3500 });
+          return json(res, 200, { ok: true, available: true, settings, cacheSize: config.cacheSize, streamingServerUrl: config.streamingServerUrl });
+        } catch (e) {
+          return json(res, 200, { ok: true, available: false, settings: {}, cacheSize: config.cacheSize, streamingServerUrl: config.streamingServerUrl, error: errText(e) });
+        }
+      }
+      if (url.pathname === "/api/server/settings" && req.method === "PUT") {
+        const body = await parseBody(req);
+        const size = Number(body.cacheSize);
+        if (!Number.isInteger(size) || size < 0 || size > 17179869184) return json(res, 400, { ok:false, error:"Cache deve estar entre 0 e 16 GiB." });
+        config.cacheSize = size;
+        saveConfig();
+        try {
+          const current = await serverJson("settings", { timeout: 3500 });
+          const existing = current.settings && typeof current.settings === "object" ? current.settings : current;
+          await serverJson("settings", { method: "POST", body: { ...existing, cacheSize: size }, timeout: 5000 });
+          return json(res, 200, { ok: true, cacheSize: size, serverUpdated: true });
+        } catch (e) {
+          return json(res, 200, { ok: true, cacheSize: size, serverUpdated: false, note: "Cache salvo no bridge. A API de configurações do servidor não aceitou a alteração: " + errText(e) });
+        }
+      }
+      return json(res, 404, { ok: false, error: "API não encontrada." });
+    } catch (e) { return json(res, e.statusCode || 502, { ok: false, error: errText(e) }); }
+  }
+
+  const torrent = url.pathname.match(/^\/media\/torrent\/([a-f0-9]{40})\/(-?\d+)$/i);
+  if (torrent && ["GET", "HEAD"].includes(req.method)) return proxyRequest(req, res, config.streamingServerUrl + "/" + torrent[1] + "/" + torrent[2]);
+  const media = url.pathname.match(/^\/media\/([A-Za-z0-9_-]{10,})\/([a-f0-9]{64})\/([A-Za-z0-9_-]+)$/);
+  if (media && ["GET", "HEAD"].includes(req.method)) {
+    const id = media[1], signature = media[2], encoded = media[3];
+    const entry = mediaEntries.get(id);
+    if (!entry || entry.expires < Date.now()) {
+      mediaEntries.delete(id);
+      return json(res, 410, { ok: false, error: "Sessão expirada. Selecione a fonte novamente." });
+    }
+    let target;
+    try { target = safeHttpUrl(Buffer.from(encoded, "base64url").toString("utf8")).href; }
+    catch { return json(res, 400, { ok: false, error: "URL de mídia inválida." }); }
+    const expected = crypto.createHmac("sha256", config.secret).update(id + "\n" + target).digest("hex");
+    if (!safeEqual(signature, expected)) return json(res, 403, { ok: false, error: "Assinatura de mídia inválida." });
+    return proxyRequest(req, res, target, entry.headers, 0, id);
+  }
+  return json(res, 404, { ok: false, error: "Não encontrado." });
+}
+
+const server = http.createServer((req, res) => {
+  route(req, res).catch(e => {
+    if (!res.headersSent) json(res, e.statusCode || 500, { ok: false, error: errText(e) });
+    else res.destroy(e);
+  });
+});
+server.listen(PORT, HOST, () => {
+  const interfaces = Object.values(os.networkInterfaces()).flat().filter(i => i && i.family === "IPv4" && !i.internal);
+  console.log("\nStremio Roku Bridge v" + VERSION);
+  console.log("Dashboard: http://127.0.0.1:" + PORT + "/");
+  for (const i of interfaces) console.log("LAN:       http://" + i.address + ":" + PORT + "/");
+  console.log("PIN:       " + config.pin);
+  console.log("Stremio Streaming Server: " + config.streamingServerUrl);
+  console.log("Mantenha este PC ligado enquanto assiste. Não exponha a porta do bridge à Internet.\n");
+});
